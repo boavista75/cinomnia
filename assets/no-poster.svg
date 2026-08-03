@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="342" height="513" viewBox="0 0 342 513" role="img" aria-label="No poster available">
+  <rect width="342" height="513" fill="#EEEEEE"/>
+  <rect x="96" y="140" width="150" height="200" rx="8" fill="#dde4e6" stroke="#5C9EAD" stroke-width="3"/>
+  <circle cx="171" cy="210" r="28" fill="#5C9EAD" opacity="0.35"/>
+  <text x="171" y="390" text-anchor="middle" fill="#326273" font-family="sans-serif" font-size="16" font-weight="600">No Image</text>
+</svg>

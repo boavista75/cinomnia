@@ -1,0 +1,17 @@
+# Cinomnia — Apache Security Rules
+# Deny direct web access to internal directories
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Block access to config, source, database, and includes
+    RewriteRule ^(config|src|database|includes)/ - [F,L]
+</IfModule>
+
+# Disable directory listing
+Options -Indexes
+
+# Prevent access to hidden files (.git, .env, etc.)
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>

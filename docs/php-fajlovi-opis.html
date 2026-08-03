@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="sr">
+<head>
+    <meta charset="UTF-8">
+    <title>Cinomnia — Opis PHP fajlova</title>
+    <style>
+        @page { margin: 2cm; }
+        body {
+            font-family: "DejaVu Sans", Arial, sans-serif;
+            font-size: 11pt;
+            line-height: 1.5;
+            color: #1a1a1a;
+        }
+        h1 {
+            font-size: 20pt;
+            color: #326273;
+            border-bottom: 2px solid #326273;
+            padding-bottom: 8px;
+            margin-bottom: 4px;
+        }
+        .subtitle {
+            color: #555;
+            font-size: 10pt;
+            margin-bottom: 24px;
+        }
+        h2 {
+            font-size: 13pt;
+            color: #326273;
+            margin-top: 22px;
+            margin-bottom: 8px;
+            page-break-after: avoid;
+        }
+        .file-entry {
+            margin-bottom: 14px;
+            page-break-inside: avoid;
+        }
+        .filename {
+            font-family: "DejaVu Sans Mono", monospace;
+            font-weight: bold;
+            font-size: 10.5pt;
+            color: #222;
+        }
+        .description {
+            margin-top: 4px;
+            text-align: justify;
+        }
+        .section-intro {
+            font-style: italic;
+            color: #444;
+            margin-bottom: 12px;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Cinomnia — Opis PHP fajlova</h1>
+<p class="subtitle">Dokumentacija projekta | Ukupno: 24 PHP fajla | Datum: 25. jun 2026.</p>
+
+<p class="section-intro">
+    Cinomnia je veb aplikacija za pretragu i praćenje filmova i TV serija (podaci sa TMDB API-ja).
+    Korisnici mogu da se registruju, ocenjuju naslove, prave liste i ostavljaju komentare.
+    Ispod je objašnjenje svakog PHP fajla u projektu, grupisano po folderima.
+</p>
+
+<h2>Glavne stranice (koren projekta)</h2>
+
+<div class="file-entry">
+    <div class="filename">index.php</div>
+    <div class="description">
+        Početna stranica aplikacije. Prikazuje mrežu (grid) filmova i TV serija preuzetih sa TMDB servisa.
+        Korisnik može da pretražuje naslove, filtrira po tipu medija (film/serija), sortira (trending, najbolje/najgore ocenjeno),
+        bira žanr, godinu izlaska i ocenu. Rezultati se prikazuju kao kartice sa posterom, ocenom i osnovnim informacijama.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">details.php</div>
+    <div class="description">
+        Stranica sa detaljima o jednom filmu ili TV seriji. Prikazuje poster, pozadinu, sinopsis, glumce, trailer,
+        sezone i epizode (za serije), ili druge delove franšize (za filmove). Ulogovani korisnici mogu da ocene naslov,
+        označe ga kao pogledanog, dodaju ga u sopstvene liste i učestvuju u diskusiji (komentari).
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">login.php</div>
+    <div class="description">
+        Stranica za prijavu korisnika. Prihvata korisničko ime ili email i lozinku, proverava podatke u bazi
+        i otvara bezbednu sesiju. Zaštita od CSRF napada. Nakon uspešne prijave preusmerava korisnika na željenu stranicu.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">register.php</div>
+    <div class="description">
+        Stranica za registraciju novih korisnika. Prikuplja korisničko ime, email i lozinku, validira unos na serveru,
+        hešira lozinku (bcrypt/argon2) i čuva novog korisnika u bazi podataka. Zaštićena CSRF tokenom.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">logout.php</div>
+    <div class="description">
+        Jednostavna skripta koja uništava korisničku sesiju (odjavljuje korisnika) i preusmerava na početnu stranicu.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">lists.php</div>
+    <div class="description">
+        Kontrolna tabla za sopstvene liste korisnika. Prikazuje sve liste (uključujući automatske liste „Pogledano“
+        i „Ocenjeno“), omogućava kreiranje, preimenovanje i brisanje lista, pregled naslova u listi i uklanjanje stavki.
+        Dostupna samo ulogovanim korisnicima.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">admin.php</div>
+    <div class="description">
+        Administrativni panel dostupan samo korisnicima sa admin pravima. Sadrži tri sekcije: upravljanje korisnicima
+        (dodavanje, izmena imena), moderacija komentara (pregled i brisanje) i pregled lokalnih ocena koje su korisnici dali.
+        Prikazuje i osnovnu statistiku (broj korisnika, komentara, ocena).
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">user-actions.php</div>
+    <div class="description">
+        JSON API endpoint za akcije ulogovanog korisnika. Obrađuje zahteve za liste (kreiranje, dodavanje/uklanjanje naslova),
+        ocene (postavljanje i brisanje), status „pogledano“ i dohvatanje istorije. Koristi se sa JavaScript-a na stranici detalja.
+        Zahteva autentifikaciju i CSRF token.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">admin-actions.php</div>
+    <div class="description">
+        JSON API endpoint samo za administratore. Omogućava brisanje korisnika i brisanje komentara putem AJAX poziva
+        iz admin panela. Zahteva prijavu, admin privilegije i validan CSRF token.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">comments-api.php</div>
+    <div class="description">
+        JSON API za komentare na stranici detalja. Omogućava čitanje komentara (javno), postavljanje novih komentara
+        i odgovora, kao i lajk/dislajk reakcije (samo za ulogovane). Koristi se JavaScript-om za dinamičko učitavanje diskusije.
+    </div>
+</div>
+
+<h2>API folder</h2>
+
+<div class="file-entry">
+    <div class="filename">api/user-actions.php</div>
+    <div class="description">
+        Zastareli (deprecated) put do user-actions API-ja. Samo prosleđuje zahtev na glavni fajl
+        <code>user-actions.php</code> u korenu projekta, radi kompatibilnosti sa starijim putanjama.
+    </div>
+</div>
+
+<h2>Folder includes (zajednički delovi stranica)</h2>
+
+<div class="file-entry">
+    <div class="filename">includes/bootstrap.php</div>
+    <div class="description">
+        Centralni ulazni fajl za sve PHP stranice. Učitava konfiguraciju, registruje autoloader za klase,
+        pokreće bezbednu sesiju i kreira zajedničke servise (TMDB, autentifikacija, liste, ocene, komentari, admin).
+        Sadrži i pomoćne funkcije: preusmeravanje, čitanje GET/POST parametara i parsiranje filtera za pretragu.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">includes/header.php</div>
+    <div class="description">
+        Zajednički HTML početak svake stranice: &lt;!DOCTYPE&gt;, &lt;head&gt; sa meta tagovima, CSS linkovima i naslovom,
+        otvaranje &lt;body&gt; taga i uključivanje navigacije (navbar).
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">includes/footer.php</div>
+    <div class="description">
+        Zajednički HTML kraj stranice: podnožje (footer) sa copyright tekstom, učitavanje JavaScript fajla za navigaciju
+        i zatvaranje &lt;body&gt; i &lt;html&gt; tagova.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">includes/navbar.php</div>
+    <div class="description">
+        Navigaciona traka sajta. Prikazuje logo, linkove ka početnoj, listama i admin panelu (ako je korisnik admin),
+        kao i dugmad za prijavu/registraciju ili profil/odjavu u zavisnosti od toga da li je korisnik ulogovan.
+        Prilagođena za mobilne uređaje (hamburger meni).
+    </div>
+</div>
+
+<h2>Folder config (podešavanja)</h2>
+
+<div class="file-entry">
+    <div class="filename">config/config.php</div>
+    <div class="description">
+        Glavni konfiguracioni fajl aplikacije. Definiše parametre za konekciju na MySQL bazu, TMDB API ključ i URL-ove,
+        putanje aplikacije, naziv sajta (Cinomnia), podešavanja sesije (trajanje, bezbednost) i algoritam za heširanje lozinki.
+        Ne može se direktno otvoriti preko veb pregledača.
+    </div>
+</div>
+
+<h2>Folder src (poslovna logika — klase)</h2>
+
+<div class="file-entry">
+    <div class="filename">src/Database/Database.php</div>
+    <div class="description">
+        Singleton klasa za konekciju na MySQL bazu preko PDO drajvera. Obezbeđuje jednu deljenu konekciju za celu aplikaciju,
+        sa striktnim režimom grešaka i podrškom za prepared statements (zaštita od SQL injekcija).
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">src/Security/Security.php</div>
+    <div class="description">
+        Bezbednosne pomoćne funkcije: pokretanje i zaštita sesije (fingerprint, regeneracija ID-ja), CSRF tokeni
+        (generisanje i validacija), XSS zaštita kroz escape() funkciju za HTML izlaz i čitanje CSRF tokena iz zahteva.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">src/Services/TMDB_Service.php</div>
+    <div class="description">
+        Klijent za TMDB (The Movie Database) API. Komunicira sa spoljnim servisom putem cURL-a i obezbeđuje metode za
+        trending/popularne naslove, pretragu, discover sa filterima, detalje filmova/serija, žanrove, postere, trailere,
+        sezone sa epizodama i kolekcije/franšize. Formatira datume, ocene i trajanje za prikaz.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">src/Auth/AuthService.php</div>
+    <div class="description">
+        Servis za autentifikaciju korisnika. Upravlja registracijom (validacija, heširanje lozinke, upis u bazu),
+        prijavom (provera kredencijala), odjavom i proverom da li je korisnik ulogovan. Čuva korisničke podatke u sesiji.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">src/Auth/AdminService.php</div>
+    <div class="description">
+        Servis za administratorske operacije. Proverava admin status u bazi, dohvata listu korisnika, kreira i briše korisnike,
+        menja korisnička imena, prikazuje statistiku panela, dohvata medije sa komentarima, briše komentare i prikazuje
+        pregled lokalnih ocena po naslovima.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">src/Auth/CommentService.php</div>
+    <div class="description">
+        Servis za komentare. Upravlja nitastim (threaded) komentarima na filmove i serije: čitanje, postavljanje komentara
+        i odgovora, lajk/dislajk reakcije. Komentari su vezani za TMDB ID i tip medija (film ili TV).
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">src/Auth/CustomListService.php</div>
+    <div class="description">
+        Servis za korisničke liste. Omogućava kreiranje, preimenovanje i brisanje lista, dodavanje i uklanjanje naslova
+        (filmova/serija po TMDB ID-ju). Upravlja i automatskim sistemskim listama „watched“ (pogledano) i „You Have Rated“
+        (ocenjeno) koje se sinhronizuju sa korisničkim akcijama.
+    </div>
+</div>
+
+<div class="file-entry">
+    <div class="filename">src/Auth/UserRatingsHistoryService.php</div>
+    <div class="description">
+        Servis za korisničke ocene i status „pogledano“. Čuva ocene od 1 do 10, omogućava brisanje ocena, prebacivanje
+        statusa pogledanog naslova i dohvatanje istorije ocena. Sinhronizuje podatke sa automatskim listama u CustomListService.
+    </div>
+</div>
+
+</body>
+</html>
