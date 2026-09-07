@@ -24,7 +24,7 @@ final class Security
             session_set_cookie_params([
                 'lifetime' => SESSION_LIFETIME,
                 'path'     => SESSION_COOKIE_PATH,
-                'secure'   => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on',
+                'secure'   => defined('APP_IS_HTTPS') ? APP_IS_HTTPS : false,
                 'httponly' => true,
                 'samesite' => 'Lax',
             ]);
@@ -46,7 +46,7 @@ final class Security
             session_set_cookie_params([
                 'lifetime' => SESSION_LIFETIME,
                 'path'     => SESSION_COOKIE_PATH,
-                'secure'   => isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on',
+                'secure'   => defined('APP_IS_HTTPS') ? APP_IS_HTTPS : false,
                 'httponly' => true,
                 'samesite' => 'Lax',
             ]);

@@ -16,18 +16,49 @@ use RuntimeException;
  */
 final class TMDB_Service
 {
+    /** Poster grid is 6 columns; 24 titles fill four complete rows. */
+    public const BROWSE_PAGE_SIZE = 24;
+
+    /** TMDB list endpoints always paginate in batches of 20. */
+    private const TMDB_PAGE_SIZE = 20;
+
     private string $apiKey;
     private string $baseUrl;
     private int $timeout;
+    private bool $sslVerify;
 
     public function __construct(
         string $apiKey = TMDB_API_KEY,
         string $baseUrl = TMDB_BASE_URL,
-        int $timeout = 15
+        int $timeout = 15,
+        ?bool $sslVerify = null
     ) {
-        $this->apiKey  = $apiKey;
-        $this->baseUrl = rtrim($baseUrl, '/');
-        $this->timeout = $timeout;
+        $this->apiKey    = $apiKey;
+        $this->baseUrl   = rtrim($baseUrl, '/');
+        $this->timeout   = $timeout;
+        $this->sslVerify = $sslVerify ?? (defined('TMDB_SSL_VERIFY') ? TMDB_SSL_VERIFY : true);
+    }
+
+    /**
+     * Shared cURL options for single and multi requests.
+     *
+     * @return array<int, mixed>
+     */
+    private function curlOptions(string $url): array
+    {
+        return [
+            CURLOPT_URL            => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => $this->timeout,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_USERAGENT      => 'Cinomnia/1.0 (+https://github.com/cinomnia)',
+            CURLOPT_HTTPHEADER     => [
+                'Accept: application/json',
+            ],
+            // Free hosts often lack a current CA bundle; allow override via .env
+            CURLOPT_SSL_VERIFYPEER => $this->sslVerify,
+            CURLOPT_SSL_VERIFYHOST => $this->sslVerify ? 2 : 0,
+        ];
     }
 
     // -------------------------------------------------------------------------
@@ -46,6 +77,53 @@ final class TMDB_Service
         $response = $this->request($endpoint, ['page' => $page]);
 
         return $response['results'] ?? [];
+    }
+
+    /**
+     * Build one browse page of titles from TMDB's 20-item pages.
+     *
+     * @param callable(int): array<int, array<string, mixed>> $fetchPage
+     * @return array<int, array<string, mixed>>
+     */
+    public function collectBrowsePage(callable $fetchPage, int $page): array
+    {
+        $page     = max(1, $page);
+        $pageSize = self::BROWSE_PAGE_SIZE;
+        $tmdbSize = self::TMDB_PAGE_SIZE;
+
+        $start         = ($page - 1) * $pageSize;
+        $firstTmdbPage = intdiv($start, $tmdbSize) + 1;
+        $lastTmdbPage  = intdiv($start + $pageSize - 1, $tmdbSize) + 1;
+        $offset        = $start % $tmdbSize;
+
+        $collected = [];
+        $tmdbPage  = $firstTmdbPage;
+
+        while (
+            $tmdbPage <= $lastTmdbPage
+            || count($collected) < ($offset + $pageSize)
+        ) {
+            $chunk = $fetchPage($tmdbPage);
+            $tmdbPage++;
+
+            if (!is_array($chunk) || $chunk === []) {
+                break;
+            }
+
+            foreach ($chunk as $item) {
+                $collected[] = $item;
+            }
+
+            if (count($chunk) < $tmdbSize) {
+                break;
+            }
+
+            if ($tmdbPage > $lastTmdbPage + 2) {
+                break;
+            }
+        }
+
+        return array_values(array_slice($collected, $offset, $pageSize));
     }
 
     /**
@@ -563,28 +641,18 @@ final class TMDB_Service
 
         $url = $this->baseUrl . $endpoint . '?' . http_build_query($params);
 
-        $ch = curl_init();
+        $ch = \curl_init();
 
         if ($ch === false) {
             throw new RuntimeException('Failed to initialise cURL.');
         }
 
-        curl_setopt_array($ch, [
-            CURLOPT_URL            => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_TIMEOUT        => $this->timeout,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_HTTPHEADER     => [
-                'Accept: application/json',
-            ],
-            // Verify SSL in production; disable only for local dev if needed
-            CURLOPT_SSL_VERIFYPEER => true,
-        ]);
+        \curl_setopt_array($ch, $this->curlOptions($url));
 
-        $response  = curl_exec($ch);
-        $httpCode  = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlError = curl_error($ch);
-        curl_close($ch);
+        $response  = \curl_exec($ch);
+        $httpCode  = (int) \curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = \curl_error($ch);
+        \curl_close($ch);
 
         if ($response === false) {
             throw new RuntimeException('TMDB API request failed: ' . $curlError);
@@ -606,8 +674,9 @@ final class TMDB_Service
     /**
      * Execute several GET requests concurrently using the cURL multi interface.
      *
-     * This lets us fetch detail data for an entire page of results in roughly
-     * the time of a single request, instead of blocking on each one in turn.
+     * Falls back to sequential single requests when curl_multi_* is unavailable
+     * (some free shared hosts ship a limited cURL build).
+     *
      * Individual failures are tolerated: a failed/invalid response yields null
      * for that key rather than throwing, so one bad item cannot break the grid.
      *
@@ -620,8 +689,16 @@ final class TMDB_Service
             return [];
         }
 
-        $multiHandle = curl_multi_init();
-        $handles     = [];
+        if (!function_exists('curl_multi_init') || !function_exists('curl_multi_exec')) {
+            return $this->requestMultipleSequential($endpoints);
+        }
+
+        $multiHandle = \curl_multi_init();
+        if ($multiHandle === false) {
+            return $this->requestMultipleSequential($endpoints);
+        }
+
+        $handles = [];
 
         // Register one easy handle per endpoint on the shared multi handle.
         foreach ($endpoints as $key => $endpoint) {
@@ -630,43 +707,57 @@ final class TMDB_Service
                 'language' => 'en-US',
             ]);
 
-            $ch = curl_init();
-            curl_setopt_array($ch, [
-                CURLOPT_URL            => $url,
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT        => $this->timeout,
-                CURLOPT_FOLLOWLOCATION => true,
-                CURLOPT_HTTPHEADER     => ['Accept: application/json'],
-                CURLOPT_SSL_VERIFYPEER => true,
-            ]);
+            $ch = \curl_init();
+            \curl_setopt_array($ch, $this->curlOptions($url));
 
-            curl_multi_add_handle($multiHandle, $ch);
+            \curl_multi_add_handle($multiHandle, $ch);
             $handles[$key] = $ch;
         }
 
         // Pump the event loop until every transfer has finished.
         do {
-            $status = curl_multi_exec($multiHandle, $stillRunning);
+            $status = \curl_multi_exec($multiHandle, $stillRunning);
             if ($stillRunning) {
                 // Block (up to 1s) until there is activity, avoiding a busy loop.
-                curl_multi_select($multiHandle, 1.0);
+                \curl_multi_select($multiHandle, 1.0);
             }
         } while ($stillRunning && $status === CURLM_OK);
 
         // Harvest, decode, and clean up each handle.
         $results = [];
         foreach ($handles as $key => $ch) {
-            $body     = curl_multi_getcontent($ch);
-            $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $body     = \curl_multi_getcontent($ch);
+            $httpCode = (int) \curl_getinfo($ch, CURLINFO_HTTP_CODE);
             $decoded  = is_string($body) ? json_decode($body, true) : null;
 
             $results[$key] = ($httpCode === 200 && is_array($decoded)) ? $decoded : null;
 
-            curl_multi_remove_handle($multiHandle, $ch);
-            curl_close($ch);
+            \curl_multi_remove_handle($multiHandle, $ch);
+            \curl_close($ch);
         }
 
-        curl_multi_close($multiHandle);
+        \curl_multi_close($multiHandle);
+
+        return $results;
+    }
+
+    /**
+     * Sequential fallback when curl_multi is unavailable.
+     *
+     * @param array<int|string, string> $endpoints
+     * @return array<int|string, array<string, mixed>|null>
+     */
+    private function requestMultipleSequential(array $endpoints): array
+    {
+        $results = [];
+
+        foreach ($endpoints as $key => $endpoint) {
+            try {
+                $results[$key] = $this->request($endpoint);
+            } catch (RuntimeException) {
+                $results[$key] = null;
+            }
+        }
 
         return $results;
     }

@@ -13,6 +13,33 @@ define('CINOMNIA_APP', true);
 
 require_once __DIR__ . '/../config/config.php';
 
+// Prefer HTTPS responses (HSTS) when the request is already secure.
+if (defined('APP_IS_HTTPS') && APP_IS_HTTPS && !headers_sent()) {
+    header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
+}
+
+if (!headers_sent()) {
+    header('X-Accel-Buffering: no');
+}
+
+/**
+ * Push already-rendered HTML to the browser so a loading screen can appear
+ * before slow TMDB work finishes.
+ */
+function cinomniaFlush(): void
+{
+    if (function_exists('apache_setenv')) {
+        @apache_setenv('no-gzip', '1');
+    }
+    @ini_set('zlib.output_compression', '0');
+
+    while (ob_get_level() > 0) {
+        ob_end_flush();
+    }
+
+    flush();
+}
+
 // Simple PSR-4-style autoloader for Cinomnia\ namespace
 spl_autoload_register(static function (string $class): void {
     $prefix = 'Cinomnia\\';
@@ -28,25 +55,25 @@ spl_autoload_register(static function (string $class): void {
     }
 });
 
-use Cinomnia\Auth\AdminService;
 use Cinomnia\Auth\AuthService;
-use Cinomnia\Auth\CommentService;
 use Cinomnia\Auth\CustomListService;
+use Cinomnia\Auth\NoteService;
 use Cinomnia\Auth\UserRatingsHistoryService;
 use Cinomnia\Security\Security;
 use Cinomnia\Services\TMDB_Service;
+use Cinomnia\Storage\JsonStore;
 
 // Initialise hardened session before any output
 Security::initSession();
 
 /** Shared service instances available to all pages */
+$store       = new JsonStore();
 $tmdb        = new TMDB_Service();
 $auth        = new AuthService();
-$customLists = new CustomListService();
-$userMedia   = new UserRatingsHistoryService($customLists);
+$customLists = new CustomListService($store);
+$userMedia   = new UserRatingsHistoryService($store, $customLists);
 $customLists->setRatingsHistoryService($userMedia);
-$comments    = new CommentService();
-$admin       = new AdminService();
+$notes       = new NoteService($store);
 
 /**
  * Helper: redirect and exit.
@@ -68,6 +95,35 @@ function safeRedirectPath(?string $path): string
 
     if (!str_starts_with($path, '/') || str_contains($path, '://')) {
         return '/index.php';
+    }
+
+    return $path;
+}
+
+/**
+ * Current request path relative to the app base (for post-login redirects).
+ */
+function currentAppPath(): string
+{
+    $uri  = (string) ($_SERVER['REQUEST_URI'] ?? '/index.php');
+    $path = (string) (parse_url($uri, PHP_URL_PATH) ?: '/index.php');
+    $base = BASE_URL;
+
+    if ($base !== '' && str_starts_with($path, $base)) {
+        $path = substr($path, strlen($base));
+    }
+
+    if ($path === '' || $path === '/') {
+        $path = '/index.php';
+    }
+
+    if (!str_starts_with($path, '/')) {
+        $path = '/' . $path;
+    }
+
+    $query = parse_url($uri, PHP_URL_QUERY);
+    if (is_string($query) && $query !== '') {
+        $path .= '?' . $query;
     }
 
     return $path;
@@ -154,4 +210,22 @@ function parseBrowseFilters(): array
         'year_to'    => $yearTo,
         'rating'     => $rating,
     ];
+}
+
+$publicScripts = ['login.php', 'logout.php'];
+$scriptName    = basename($_SERVER['SCRIPT_NAME'] ?? '');
+
+if (!in_array($scriptName, $publicScripts, true) && !$auth->isLoggedIn()) {
+    $wantsJson = $scriptName === 'user-actions.php'
+        || $scriptName === 'search-api.php'
+        || str_contains(strtolower((string) ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')), 'xmlhttprequest');
+
+    if ($wantsJson) {
+        http_response_code(401);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['success' => false, 'message' => 'Authentication required.']);
+        exit;
+    }
+
+    redirect('/login.php?redirect=' . urlencode(safeRedirectPath(currentAppPath())));
 }

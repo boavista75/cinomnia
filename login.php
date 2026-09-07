@@ -5,15 +5,13 @@ declare(strict_types=1);
 /**
  * Cinomnia Login Page
  *
- * Authenticates users via username/email + password.
- * Creates a secure session on success with CSRF protection on the form.
+ * Authenticates the single owner account. Registration is disabled.
  */
 
 require_once __DIR__ . '/includes/bootstrap.php';
 
 use Cinomnia\Security\Security;
 
-// Redirect already-authenticated users to home
 if ($auth->isLoggedIn()) {
     redirect('/index.php');
 }
@@ -30,11 +28,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!Security::validateCsrfToken(postParam('csrf_token'))) {
         $error = 'Invalid security token. Please try again.';
     } else {
-        $identifier = postParam('identifier');
-        $password   = postParam('password');
-
         try {
-            $result = $auth->login($identifier, $password);
+            $result = $auth->login(postParam('username'), postParam('password'));
 
             if ($result['success']) {
                 redirect($redirect);
@@ -47,15 +42,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$pageTitle = 'Login';
+$pageTitle = 'Sign In';
 
 require __DIR__ . '/includes/header.php';
 ?>
 
 <main class="auth-page">
     <div class="auth-card">
-        <h1 class="auth-card__title">Sign In</h1>
-        <p class="auth-card__subtitle">Welcome back to <?= Security::escape(APP_NAME) ?></p>
+        <p class="auth-card__mark" aria-hidden="true">C</p>
+        <h1 class="auth-card__title">Welcome back</h1>
+        <p class="auth-card__subtitle">Private cinema library — <?= Security::escape(APP_NAME) ?></p>
 
         <?php if ($error !== ''): ?>
             <div class="alert alert--error" role="alert"><?= Security::escape($error) ?></div>
@@ -69,13 +65,13 @@ require __DIR__ . '/includes/header.php';
             <?= Security::csrfField() ?>
 
             <div class="form-group">
-                <label for="identifier" class="form-group__label">Username or Email</label>
+                <label for="username" class="form-group__label">Username</label>
                 <input
                     type="text"
-                    id="identifier"
-                    name="identifier"
+                    id="username"
+                    name="username"
                     class="form-group__input"
-                    value="<?= Security::escape(postParam('identifier')) ?>"
+                    value="<?= Security::escape(postParam('username')) ?>"
                     required
                     autocomplete="username"
                     autofocus
@@ -96,11 +92,6 @@ require __DIR__ . '/includes/header.php';
 
             <button type="submit" class="btn btn--primary btn--full">Sign In</button>
         </form>
-
-        <p class="auth-card__footer">
-            Don't have an account?
-            <a href="<?= Security::escape(BASE_URL) ?>/register.php">Register here</a>
-        </p>
     </div>
 </main>
 

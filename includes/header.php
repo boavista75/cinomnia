@@ -17,14 +17,55 @@ $pageTitle = $pageTitle ?? APP_NAME;
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="description" content="Cinomnia — Discover movies and TV shows powered by TMDB">
     <title><?= Security::escape($pageTitle) ?> | <?= Security::escape(APP_NAME) ?></title>
+    <script>
+        (function () {
+            var key = 'cinomnia-theme';
+            var theme = 'dark';
+            try {
+                var stored = localStorage.getItem(key);
+                if (stored === 'light' || stored === 'dark') {
+                    theme = stored;
+                } else if (window.matchMedia('(prefers-color-scheme: light)').matches) {
+                    theme = 'light';
+                }
+            } catch (e) {}
+            document.documentElement.setAttribute('data-theme', theme);
+            document.documentElement.style.colorScheme = theme;
+        })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Poppins:wght@600;700;800&display=swap">
-    <link rel="stylesheet" href="<?= Security::escape(BASE_URL) ?>/css/style.css">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23326273'/><text x='50' y='68' text-anchor='middle' fill='%23FFFFFF' font-family='sans-serif' font-size='52' font-weight='700'>C</text></svg>">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap">
+    <link rel="stylesheet" href="<?= Security::escape(BASE_URL) ?>/css/style.css?v=<?= (int) filemtime(APP_ROOT . '/css/style.css') ?>">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230B1018'/><text x='50' y='68' text-anchor='middle' fill='%236EA8FF' font-family='serif' font-size='54' font-weight='700'>C</text></svg>">
+    <style>
+        html:not(.app-ready){overflow:hidden}
+        .app-loader{position:fixed;inset:0;z-index:5000;display:flex;align-items:center;justify-content:center;padding:1.5rem;background:var(--loader-bg,rgba(8,12,20,.88));-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);transition:opacity .32s ease,visibility .32s ease}
+        html.app-ready .app-loader{opacity:0;visibility:hidden;pointer-events:none}
+        .app-loader__card{display:flex;flex-direction:column;align-items:center;gap:.9rem;max-width:20rem;text-align:center;color:var(--loader-fg,#E8EEF6)}
+        .app-loader__brand{margin:0;font:700 1.55rem/1.1 Nunito,Outfit,sans-serif;letter-spacing:-.02em}
+        .app-loader__spinner{width:2rem;height:2rem;border:2px solid rgba(232,238,246,.16);border-top-color:var(--color-accent,#6EA8FF);border-radius:50%;animation:appLoaderSpin .8s linear infinite}
+        html[data-theme="light"] .app-loader__spinner{border:2px solid rgba(21,32,51,.16);border-top-color:var(--color-accent,#3B6FE8)}
+        .app-loader__title{margin:0;font:600 1.1rem/1.3 Nunito,Outfit,sans-serif}
+        .app-loader__text{margin:0;font:400 .9rem/1.45 Nunito,Outfit,sans-serif;color:var(--loader-muted,rgba(232,238,246,.62))}
+        @keyframes appLoaderSpin{to{transform:rotate(360deg)}}
+        @media (prefers-reduced-motion:reduce){.app-loader__spinner{animation:none;border-top-color:currentColor}}
+    </style>
 </head>
 <body>
+<div id="app-loader" class="app-loader" role="status" aria-live="polite" aria-busy="true">
+    <div class="app-loader__card">
+        <p class="app-loader__brand"><?= Security::escape(APP_NAME) ?></p>
+        <span class="app-loader__spinner" aria-hidden="true"></span>
+        <p class="app-loader__title">Please wait</p>
+        <p class="app-loader__text" id="app-loader-text">Loading… this may take a moment.</p>
+    </div>
+</div>
 <?php require __DIR__ . '/navbar.php'; ?>
+<?php
+if (function_exists('cinomniaFlush')) {
+    cinomniaFlush();
+}

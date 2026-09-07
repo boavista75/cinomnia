@@ -24,9 +24,15 @@ if ($id <= 0) {
 $detailsPath = '/details.php?type=' . urlencode($mediaType) . '&id=' . $id;
 $userRating  = null;
 $isWatched   = false;
+$isWantToWatch = false;
 $userLists   = [];
 $listIdsWithItem = [];
 $userPanelConfig = null;
+$noteBody    = '';
+$noteUpdated = null;
+$pageTitle   = $mediaType === 'tv' ? 'TV Show' : 'Movie';
+
+require __DIR__ . '/includes/header.php';
 
 // --- Fetch TMDB data ---
 try {
@@ -38,8 +44,6 @@ try {
 }
 
 if ($details === null) {
-    $pageTitle = 'Not Found';
-    require __DIR__ . '/includes/header.php';
     ?>
     <main class="detail-page">
         <div class="detail-content">
@@ -89,6 +93,34 @@ if ($auth->isLoggedIn()) {
         $isWatched  = $interaction['is_watched'];
     }
 
+    $isWantToWatch = $customLists->isItemInWantToWatchList($userId, $id, $mediaType);
+
+    $note           = $notes->getNote($id, $mediaType);
+    $noteBody       = $note['body'];
+    $noteUpdated    = $note['updated_at'];
+
+    $scoreWord = 'Not rated';
+    $scoreTone = 'empty';
+
+    if ($userRating !== null) {
+        if ($userRating <= 3) {
+            $scoreWord = 'Poor';
+            $scoreTone = 'low';
+        } elseif ($userRating <= 5) {
+            $scoreWord = 'Okay';
+            $scoreTone = 'mid';
+        } elseif ($userRating <= 7) {
+            $scoreWord = 'Good';
+            $scoreTone = 'good';
+        } elseif ($userRating <= 9) {
+            $scoreWord = 'Great';
+            $scoreTone = 'great';
+        } else {
+            $scoreWord = 'Excellent';
+            $scoreTone = 'top';
+        }
+    }
+
     $csrfToken = Security::generateCsrfToken();
 
     $userPanelConfig = [
@@ -99,6 +131,7 @@ if ($auth->isLoggedIn()) {
         'posterPath'      => $posterPath,
         'userRating'      => $userRating,
         'isWatched'       => $isWatched,
+        'isWantToWatch'   => $isWantToWatch,
         'lists'           => $userLists,
         'listIdsWithItem' => $listIdsWithItem,
     ];
@@ -133,19 +166,19 @@ $loginFlash = getParam('msg') === 'login_required'
     : '';
 
 $detailPageConfig = [
-    'tmdbId'         => $id,
-    'mediaType'      => $mediaType,
-    'commentsApiUrl' => BASE_URL . '/comments-api.php',
-    'isLoggedIn'     => $auth->isLoggedIn(),
-    'username'       => $auth->getUsername(),
-    'loginUrl'       => BASE_URL . '/login.php?redirect=' . urlencode($detailsPath),
+    'tmdbId'       => $id,
+    'mediaType'    => $mediaType,
+    'notesApiUrl'  => BASE_URL . '/user-actions.php',
+    'noteMaxChars' => \Cinomnia\Auth\NoteService::MAX_BODY_LENGTH,
 ];
-
-require __DIR__ . '/includes/header.php';
 ?>
 
 <main class="detail-page">
-    <!-- Immersive hero with backdrop, poster, meta & CTAs -->
+    <script>document.title = <?= json_encode($title . ' | ' . APP_NAME, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE) ?>;</script>
+    <?php if ($auth->isLoggedIn() && isset($csrfToken)): ?>
+        <input type="hidden" id="detail-csrf-token" value="<?= Security::escape($csrfToken) ?>">
+    <?php endif; ?>
+    <!-- Immersive hero with backdrop, poster, meta & library dock -->
     <section class="detail-hero"<?= $backdrop !== null ? ' style="background-image:url(\'' . Security::escape($backdrop) . '\')"' : '' ?>>
         <div class="detail-hero__scrim"></div>
         <div class="detail-hero__inner">
@@ -163,104 +196,46 @@ require __DIR__ . '/includes/header.php';
                     </span>
                     <h1 class="detail-hero__title"><?= Security::escape($title) ?></h1>
 
-                    <div class="detail-hero__meta">
-                        <span class="detail-hero__rating"><?= Security::escape($rating) ?> <small>/ 10</small></span>
-                        <span class="detail-hero__meta-item"><?= Security::escape($releaseDate) ?></span>
-                        <span class="detail-hero__meta-item"><?= Security::escape($runtime) ?></span>
+                    <ul class="detail-hero__facts">
+                        <li class="detail-hero__facts-score">
+                            <strong><?= Security::escape($rating) ?></strong>
+                            <span>TMDB</span>
+                        </li>
+                        <li><?= Security::escape($releaseDate) ?></li>
+                        <li><?= Security::escape($runtime) ?></li>
                         <?php if ($mediaType === 'tv' && $seasons > 0): ?>
-                            <span class="detail-hero__meta-item">
-                                <?= $seasons ?> Season<?= $seasons === 1 ? '' : 's' ?>
-                                &middot; <?= $episodes ?> Episodes
-                            </span>
+                            <li>
+                                <?= $seasons ?> season<?= $seasons === 1 ? '' : 's' ?>
+                                · <?= $episodes ?> episodes
+                            </li>
                         <?php endif; ?>
-                        <span class="detail-hero__meta-item detail-hero__meta-item--muted">
-                            <?= number_format($voteCount) ?> votes
-                        </span>
-                    </div>
+                        <li><?= number_format($voteCount) ?> votes</li>
+                    </ul>
 
                     <?php if (!empty($genres)): ?>
-                        <div class="detail-hero__genres">
-                            <?php foreach ($genres as $genreName): ?>
-                                <span class="detail-hero__genre"><?= Security::escape($genreName) ?></span>
-                            <?php endforeach; ?>
-                        </div>
+                        <p class="detail-hero__genres">
+                            <?= Security::escape(implode(' · ', $genres)) ?>
+                        </p>
                     <?php endif; ?>
 
-                    <div class="detail-hero__actions">
+                    <div class="detail-hero__cta">
                         <?php if ($trailerKey !== null): ?>
                             <button type="button"
-                                    class="btn btn--accent btn--lg"
+                                    class="btn btn--accent btn--lg detail-hero__trailer"
                                     id="play-trailer-btn"
                                     data-trailer-key="<?= Security::escape($trailerKey) ?>">
+                                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                                    <path fill="currentColor" d="M8 5.14v13.72L19.5 12 8 5.14z"/>
+                                </svg>
                                 Play Trailer
                             </button>
                         <?php else: ?>
-                            <button type="button" class="btn btn--accent btn--lg" disabled>
+                            <button type="button" class="btn btn--accent btn--lg detail-hero__trailer" disabled>
                                 Trailer Unavailable
                             </button>
                         <?php endif; ?>
 
-                        <?php if ($auth->isLoggedIn() && $userPanelConfig !== null): ?>
-                            <input type="hidden" id="detail-csrf-token" value="<?= Security::escape($csrfToken) ?>">
-                            <div class="detail-user-panel" id="detail-user-panel">
-                                <div class="detail-user-panel__row">
-                                    <button type="button"
-                                            id="watched-toggle-btn"
-                                            class="detail-user-panel__watched-btn<?= $isWatched ? ' is-watched' : '' ?>"
-                                            aria-pressed="<?= $isWatched ? 'true' : 'false' ?>">
-                                        <span class="detail-user-panel__watched-icon" aria-hidden="true">
-                                            <?= $isWatched ? '&#10003;' : '&#9675;' ?>
-                                        </span>
-                                        <span class="detail-user-panel__watched-label">
-                                            <?= $isWatched ? 'Watched' : 'Mark as Watched' ?>
-                                        </span>
-                                    </button>
-
-                                    <button type="button"
-                                            id="add-to-list-btn"
-                                            class="btn btn--secondary btn--lg detail-user-panel__list-btn">
-                                        Add to List
-                                    </button>
-                                </div>
-
-                                <div class="detail-user-panel__rating" id="user-rating-widget">
-                                    <div class="detail-user-panel__rating-header">
-                                        <span class="detail-user-panel__rating-title">Your Rating</span>
-                                        <span class="detail-user-panel__rating-value" id="user-rating-value">
-                                            <?= $userRating !== null ? $userRating . ' / 10' : 'Not rated' ?>
-                                        </span>
-                                    </div>
-                                    <div class="star-rating"
-                                         id="star-rating"
-                                         role="slider"
-                                         aria-label="Rate this title from 1 to 10"
-                                         aria-valuemin="1"
-                                         aria-valuemax="10"
-                                         aria-valuenow="<?= $userRating ?? 0 ?>"
-                                         tabindex="0">
-                                        <?php for ($i = 1; $i <= 10; $i++): ?>
-                                            <button type="button"
-                                                    class="star-rating__star<?= $userRating !== null && $i <= $userRating ? ' is-active' : '' ?>"
-                                                    data-value="<?= $i ?>"
-                                                    aria-label="Rate <?= $i ?> out of 10">
-                                                <svg viewBox="0 0 24 24" aria-hidden="true">
-                                                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
-                                                </svg>
-                                            </button>
-                                        <?php endfor; ?>
-                                    </div>
-                                    <p class="detail-user-panel__rating-hint" id="rating-feedback" role="status" aria-live="polite"></p>
-                                </div>
-
-                                <p class="detail-user-panel__toast" id="user-panel-toast" role="status" aria-live="polite" hidden></p>
-                            </div>
-                            <script type="application/json" id="detail-user-config"><?=
-                                json_encode(
-                                    $userPanelConfig,
-                                    JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG
-                                )
-                            ?></script>
-                        <?php else: ?>
+                        <?php if (!$auth->isLoggedIn()): ?>
                             <a href="<?= Security::escape(BASE_URL) ?>/login.php?redirect=<?= urlencode($detailsPath) ?>"
                                class="btn btn--secondary btn--lg">
                                 Log in to track this title
@@ -272,19 +247,90 @@ require __DIR__ . '/includes/header.php';
                         <p class="detail-hero__flash" role="status"><?= Security::escape($loginFlash) ?></p>
                     <?php endif; ?>
                 </div>
+
+                <?php if ($auth->isLoggedIn() && $userPanelConfig !== null): ?>
+                    <div class="detail-dock" id="detail-user-panel">
+                        <div class="detail-dock__library">
+                            <p class="detail-dock__label">Library</p>
+                            <div class="detail-dock__status" role="group" aria-label="Watch status">
+                                <button type="button"
+                                        id="want-to-watch-btn"
+                                        class="detail-dock__chip<?= $isWantToWatch ? ' is-active is-want' : '' ?>"
+                                        aria-pressed="<?= $isWantToWatch ? 'true' : 'false' ?>">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                                        <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"
+                                              d="M6.5 4.5h11a1 1 0 0 1 1 1v14l-6.5-3.4-6.5 3.4v-14a1 1 0 0 1 1-1z"/>
+                                    </svg>
+                                    Want to Watch
+                                </button>
+                                <button type="button"
+                                        id="watched-toggle-btn"
+                                        class="detail-dock__chip<?= $isWatched ? ' is-active is-watched' : '' ?>"
+                                        aria-pressed="<?= $isWatched ? 'true' : 'false' ?>">
+                                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                                        <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/>
+                                        <path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+                                              d="M8.2 12.3l2.4 2.4 5.2-5.4"/>
+                                    </svg>
+                                    Watched
+                                </button>
+                            </div>
+                            <button type="button" id="add-to-list-btn" class="detail-dock__list-link">
+                                Add to a list
+                            </button>
+                        </div>
+
+                        <div class="detail-dock__score" id="user-rating-widget">
+                            <p class="detail-dock__label">Your score</p>
+                            <div class="detail-score">
+                                <div class="detail-score__display detail-score__display--<?= Security::escape($scoreTone) ?>">
+                                    <span class="detail-score__number" id="user-rating-value">
+                                        <?= $userRating !== null ? (int) $userRating : '—' ?>
+                                    </span>
+                                    <span class="detail-score__suffix">/10</span>
+                                    <span class="detail-score__word" id="user-rating-word"><?= Security::escape($scoreWord) ?></span>
+                                </div>
+                                <div class="score-picker"
+                                     id="score-picker"
+                                     role="radiogroup"
+                                     aria-label="Rate this title from 1 to 10">
+                                    <?php for ($i = 1; $i <= 10; $i++): ?>
+                                        <button type="button"
+                                                class="score-picker__btn<?= $userRating === $i ? ' is-active' : '' ?>"
+                                                data-value="<?= $i ?>"
+                                                role="radio"
+                                                aria-checked="<?= $userRating === $i ? 'true' : 'false' ?>"
+                                                aria-label="Rate <?= $i ?> out of 10">
+                                            <?= $i ?>
+                                        </button>
+                                    <?php endfor; ?>
+                                </div>
+                            </div>
+                        </div>
+
+                        <p class="detail-dock__toast" id="user-panel-toast" role="status" aria-live="polite" hidden></p>
+                    </div>
+                    <script type="application/json" id="detail-user-config"><?=
+                        json_encode(
+                            $userPanelConfig,
+                            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_HEX_TAG
+                        )
+                    ?></script>
+                <?php endif; ?>
             </div>
         </div>
     </section>
 
     <!-- Main content sections -->
     <div class="detail-content">
+        <div class="detail-content__grid">
         <section class="detail-block">
             <h2 class="detail-block__title">Synopsis</h2>
             <p class="detail-block__text"><?= Security::escape($overview) ?></p>
         </section>
 
         <?php if (!empty($cast)): ?>
-            <section class="detail-block">
+            <section class="detail-block detail-block--cast">
                 <h2 class="detail-block__title">Cast</h2>
                 <div class="cast-grid">
                     <?php foreach ($cast as $member): ?>
@@ -374,48 +420,57 @@ require __DIR__ . '/includes/header.php';
                 </div>
             </section>
         <?php endif; ?>
-    </div>
 
-    <!-- Comments -->
-    <section class="detail-comments" id="detail-comments" aria-labelledby="detail-comments-title">
-        <div class="detail-comments__inner">
-            <header class="detail-comments__header">
-                <h2 class="detail-comments__title" id="detail-comments-title">Discussion</h2>
-                <p class="detail-comments__subtitle">Share your thoughts on <?= Security::escape($title) ?></p>
-            </header>
+        <?php if ($auth->isLoggedIn()): ?>
+            <?php $hasNote = $noteBody !== ''; ?>
+            <section class="detail-block detail-notes" id="detail-notes" aria-labelledby="detail-notes-title">
+                <h2 class="detail-block__title" id="detail-notes-title">Notes</h2>
+                <p class="detail-notes__lede">Your private impressions of <?= Security::escape($title) ?></p>
 
-            <?php if ($auth->isLoggedIn()): ?>
-                <form id="comment-form" class="detail-comments__form">
-                    <label class="detail-comments__form-label" for="comment-body">Your comment</label>
-                    <textarea id="comment-body"
-                              class="detail-comments__textarea"
-                              rows="3"
-                              maxlength="2000"
-                              placeholder="What did you think of this title?"
-                              required></textarea>
-                    <div class="detail-comments__form-footer">
-                        <span class="detail-comments__char-count" id="comment-char-count">0 / 2000</span>
-                        <button type="submit" class="btn btn--accent btn--sm" id="comment-submit-btn">
-                            Post Comment
+                <div class="detail-notes__card" id="note-view"<?= $hasNote ? '' : ' hidden' ?>>
+                    <p class="detail-notes__body" id="note-display"><?= Security::escape($noteBody) ?></p>
+                    <div class="detail-notes__toolbar">
+                        <span class="detail-notes__meta" id="note-saved-at">
+                            <?php if ($noteUpdated !== null && $noteUpdated !== ''): ?>
+                                Last saved <?= Security::escape($noteUpdated) ?>
+                            <?php endif; ?>
+                        </span>
+                        <button type="button" class="btn btn--secondary btn--sm" id="note-edit-btn">
+                            Edit notes
                         </button>
                     </div>
-                </form>
-            <?php else: ?>
-                <div class="detail-comments__login-prompt">
-                    <a href="<?= Security::escape(BASE_URL) ?>/login.php?redirect=<?= urlencode($detailsPath) ?>"
-                       class="btn btn--secondary btn--sm">
-                        Log in to join the discussion
-                    </a>
                 </div>
-            <?php endif; ?>
 
-            <p class="detail-comments__feedback" id="comments-feedback" role="status" aria-live="polite" hidden></p>
+                <form id="note-form" class="detail-notes__card detail-notes__form"<?= $hasNote ? ' hidden' : '' ?>>
+                    <label class="form-group__label" for="note-body">Your notes</label>
+                    <textarea id="note-body"
+                              class="form-group__input detail-notes__textarea"
+                              rows="6"
+                              maxlength="<?= (int) \Cinomnia\Auth\NoteService::MAX_BODY_LENGTH ?>"
+                              placeholder="Write what you thought of this title…"><?= Security::escape($noteBody) ?></textarea>
+                    <div class="detail-notes__toolbar">
+                        <span class="detail-notes__meta" id="note-char-count">
+                            <?= mb_strlen($noteBody) ?> / <?= (int) \Cinomnia\Auth\NoteService::MAX_BODY_LENGTH ?>
+                        </span>
+                        <div class="detail-notes__actions">
+                            <button type="button"
+                                    class="btn btn--secondary btn--sm"
+                                    id="note-cancel-btn"
+                                    <?= $hasNote ? '' : ' hidden' ?>>
+                                Cancel
+                            </button>
+                            <button type="submit" class="btn btn--primary btn--sm" id="note-submit-btn">
+                                Save notes
+                            </button>
+                        </div>
+                    </div>
+                </form>
 
-            <div class="detail-comments__loading" id="comments-loading">Loading comments…</div>
-            <ul class="detail-comments__list" id="comments-list" hidden></ul>
-            <p class="detail-comments__empty" id="comments-empty" hidden>No comments yet. Be the first to share your thoughts!</p>
+                <p class="detail-notes__feedback" id="note-feedback" role="status" aria-live="polite" hidden></p>
+            </section>
+        <?php endif; ?>
         </div>
-    </section>
+    </div>
 </main>
 
 <script type="application/json" id="detail-page-config"><?=
@@ -423,7 +478,7 @@ require __DIR__ . '/includes/header.php';
 ?></script>
 
 <!-- Trailer modal -->
-<div class="modal" id="trailer-modal" hidden aria-hidden="true" role="dialog" aria-labelledby="trailer-modal-title">
+<div class="modal modal--video" id="trailer-modal" hidden aria-hidden="true" role="dialog" aria-labelledby="trailer-modal-title">
     <div class="modal__backdrop" data-close-modal="trailer"></div>
     <div class="modal__dialog">
         <div class="modal__header">
@@ -495,6 +550,6 @@ require __DIR__ . '/includes/header.php';
 </div>
 <?php endif; ?>
 
-<script src="<?= Security::escape(BASE_URL) ?>/js/details.js"></script>
+<script src="<?= Security::escape(BASE_URL) ?>/js/details.js?v=<?= (int) filemtime(APP_ROOT . '/js/details.js') ?>"></script>
 
 <?php require __DIR__ . '/includes/footer.php'; ?>

@@ -30,5 +30,9 @@ __pycache__/
 venv/
 
 # Local dumps / backups
+*.sql
 *.sql.gz
 *.bak
+
+# Private JSON store (lists, ratings, notes)
+/data/*.json

@@ -12,6 +12,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/includes/bootstrap.php';
 
 use Cinomnia\Security\Security;
+use Cinomnia\Services\TMDB_Service;
 
 // --- Parse and sanitise query parameters ---
 $mediaType = getParam('type', 'movie');
@@ -43,28 +44,7 @@ $baseQuery = [
 
 $errorMessage = null;
 $results      = [];
-
-try {
-    if ($search !== '') {
-        // Search uses multi-search; other filters are not applied by TMDB search API
-        $results = $tmdb->search($search, $page);
-    } elseif (!$tmdb->requiresDiscoverEndpoint($filters)) {
-        // Pure "Trending" with no extra filters → dedicated trending endpoint
-        $results = $tmdb->getTrending($mediaType, $page);
-    } else {
-        // Combined sort / year / rating / genre → discover API
-        $results = $tmdb->discover($mediaType, $filters, $page);
-    }
-
-    // List endpoints omit runtime / season / episode counts — fetch them in
-    // parallel and append to each result so cards can show full metadata.
-    $results = $tmdb->enrichWithDetails($results, $mediaType);
-
-    $genres = $tmdb->getGenres($mediaType);
-} catch (Throwable $e) {
-    $errorMessage = 'Unable to load content from TMDB. Please check your internet connection.';
-    $genres       = [];
-}
+$genres       = [];
 
 // Human-readable labels for the results heading
 $sortLabels = [
@@ -87,54 +67,108 @@ $pageTitle = $search !== ''
     : ($mediaType === 'tv' ? 'TV Shows' : 'Movies');
 
 require __DIR__ . '/includes/header.php';
+
+try {
+    if ($search !== '') {
+        // Search uses multi-search; other filters are not applied by TMDB search API
+        $results = $tmdb->collectBrowsePage(
+            fn (int $tmdbPage): array => $tmdb->search($search, $tmdbPage),
+            $page
+        );
+    } elseif (!$tmdb->requiresDiscoverEndpoint($filters)) {
+        // Pure "Trending" with no extra filters → dedicated trending endpoint
+        $results = $tmdb->collectBrowsePage(
+            fn (int $tmdbPage): array => $tmdb->getTrending($mediaType, $tmdbPage),
+            $page
+        );
+    } else {
+        // Combined sort / year / rating / genre → discover API
+        $results = $tmdb->collectBrowsePage(
+            fn (int $tmdbPage): array => $tmdb->discover($mediaType, $filters, $tmdbPage),
+            $page
+        );
+    }
+
+    // List endpoints omit runtime / season / episode counts — fetch them in
+    // parallel and append to each result so cards can show full metadata.
+    $results = $tmdb->enrichWithDetails($results, $mediaType);
+
+    $genres = $tmdb->getGenres($mediaType);
+} catch (Throwable $e) {
+    $errorMessage = 'Unable to load content from TMDB. Please check your internet connection.'
+        . ' [' . $e->getMessage() . ']';
+    $genres = [];
+}
 ?>
 
-<main class="layout">
-    <!-- ==================================================================== -->
-    <!-- Sidebar: a SINGLE filter form. The TMDB request is only triggered     -->
-    <!-- when the "Apply Filters" button at the bottom is clicked (form submit) -->
-    <!-- ==================================================================== -->
-    <aside class="sidebar" aria-label="Filters">
-        <form class="filters" method="GET" action="<?= Security::escape(BASE_URL) ?>/index.php">
-            <div class="filters__head">
-                <h2 class="filters__title">Filters</h2>
-                <a href="<?= Security::escape(BASE_URL) ?>/index.php" class="filters__reset-link">Reset</a>
+<main class="browse">
+    <section class="browse__hero">
+        <p class="browse__eyebrow">Private cinema</p>
+        <div class="content__header">
+            <h1 class="content__title">
+                <?php if ($search !== ''): ?>
+                    Results for “<?= Security::escape($search) ?>”
+                <?php else: ?>
+                    <?= Security::escape($sortLabels[$sort] ?? 'Trending') ?>
+                    <?= Security::escape($mediaType === 'tv' ? 'TV Shows' : 'Movies') ?>
+                    <?php if ($genreId > 0): ?>
+                        — <?= Security::escape(
+                            array_values(array_filter($genres, fn($g) => (int) $g['id'] === $genreId))[0]['name'] ?? 'Genre'
+                        ) ?>
+                    <?php endif; ?>
+                <?php endif; ?>
+            </h1>
+            <span class="content__count"><?= count($results) ?> titles</span>
+        </div>
+    </section>
+
+    <form class="filters" method="GET" action="<?= Security::escape(BASE_URL) ?>/index.php" aria-label="Filters">
+        <div class="filters__primary">
+            <div class="filters__search" data-search-url="<?= Security::escape(BASE_URL) ?>/search-api.php">
+                <label class="visually-hidden" for="q">Search</label>
+                <input
+                    type="search"
+                    id="q"
+                    name="q"
+                    class="filters__search-input"
+                    placeholder="Search titles…"
+                    value="<?= Security::escape($search) ?>"
+                    autocomplete="off"
+                    spellcheck="false"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-controls="search-suggest"
+                    aria-expanded="false"
+                    aria-haspopup="listbox"
+                    aria-label="Search movies and TV shows"
+                >
+                <span class="filters__search-spinner" aria-hidden="true"></span>
+                <div
+                    class="search-suggest"
+                    id="search-suggest"
+                    role="listbox"
+                    aria-label="Search suggestions"
+                    hidden
+                ></div>
             </div>
 
-            <!-- Search -->
-            <div class="filters__group">
-                <label class="filters__label" for="q">Search</label>
-                <div class="filters__search">
-                    <input
-                        type="search"
-                        id="q"
-                        name="q"
-                        class="filters__search-input"
-                        placeholder="Search titles…"
-                        value="<?= Security::escape($search) ?>"
-                        aria-label="Search movies and TV shows"
-                    >
-                </div>
+            <div class="segmented" role="radiogroup" aria-label="Media type">
+                <label class="segmented__option">
+                    <input type="radio" name="type" value="movie"<?= $mediaType === 'movie' ? ' checked' : '' ?>>
+                    <span class="segmented__pill">Movies</span>
+                </label>
+                <label class="segmented__option">
+                    <input type="radio" name="type" value="tv"<?= $mediaType === 'tv' ? ' checked' : '' ?>>
+                    <span class="segmented__pill">TV Shows</span>
+                </label>
             </div>
 
-            <!-- Media Type (segmented control) -->
-            <div class="filters__group">
-                <span class="filters__label">Media Type</span>
-                <div class="segmented" role="radiogroup" aria-label="Media type">
-                    <label class="segmented__option">
-                        <input type="radio" name="type" value="movie"<?= $mediaType === 'movie' ? ' checked' : '' ?>>
-                        <span class="segmented__pill">Movies</span>
-                    </label>
-                    <label class="segmented__option">
-                        <input type="radio" name="type" value="tv"<?= $mediaType === 'tv' ? ' checked' : '' ?>>
-                        <span class="segmented__pill">TV Shows</span>
-                    </label>
-                </div>
-            </div>
+            <button type="submit" class="btn btn--primary filters__apply">Apply</button>
+        </div>
 
-            <!-- Sort By (chip group) -->
+        <div class="filters__secondary">
             <div class="filters__group">
-                <span class="filters__label">Sort By</span>
+                <span class="filters__label">Sort</span>
                 <div class="chip-group" role="radiogroup" aria-label="Sort by">
                     <?php foreach ($sortLabels as $sortKey => $sortLabel): ?>
                         <label class="chip">
@@ -145,8 +179,7 @@ require __DIR__ . '/includes/header.php';
                 </div>
             </div>
 
-            <!-- Genre (select) -->
-            <div class="filters__group">
+            <div class="filters__group filters__group--select">
                 <label class="filters__label" for="genre">Genre</label>
                 <div class="select-wrap">
                     <select id="genre" name="genre" class="select">
@@ -160,9 +193,8 @@ require __DIR__ . '/includes/header.php';
                 </div>
             </div>
 
-            <!-- Release Year (From – To) -->
-            <div class="filters__group">
-                <span class="filters__label">Release Year</span>
+            <div class="filters__group filters__group--select">
+                <span class="filters__label">Year</span>
                 <div class="filters__range">
                     <div class="select-wrap">
                         <select name="year_from" class="select" aria-label="Year from">
@@ -184,8 +216,7 @@ require __DIR__ . '/includes/header.php';
                 </div>
             </div>
 
-            <!-- Rating (select) -->
-            <div class="filters__group">
+            <div class="filters__group filters__group--select">
                 <label class="filters__label" for="rating">Rating</label>
                 <div class="select-wrap">
                     <select id="rating" name="rating" class="select">
@@ -199,33 +230,11 @@ require __DIR__ . '/includes/header.php';
                 </div>
             </div>
 
-            <!-- Sticky action bar with the single Apply Filters button -->
-            <div class="filters__actions">
-                <button type="submit" class="btn btn--primary btn--full btn--lg">
-                    Apply Filters
-                </button>
-            </div>
-        </form>
-    </aside>
-
-    <!-- Main Content -->
-    <section class="content" aria-label="Results">
-        <div class="content__header">
-            <h1 class="content__title">
-                <?php if ($search !== ''): ?>
-                    Results for "<?= Security::escape($search) ?>"
-                <?php else: ?>
-                    <?= Security::escape($sortLabels[$sort] ?? 'Trending') ?>
-                    <?= Security::escape($mediaType === 'tv' ? 'TV Shows' : 'Movies') ?>
-                    <?php if ($genreId > 0): ?>
-                        — <?= Security::escape(
-                            array_values(array_filter($genres, fn($g) => (int) $g['id'] === $genreId))[0]['name'] ?? 'Genre'
-                        ) ?>
-                    <?php endif; ?>
-                <?php endif; ?>
-            </h1>
-            <span class="content__count"><?= count($results) ?> titles</span>
+            <a href="<?= Security::escape(BASE_URL) ?>/index.php" class="filters__reset-link">Reset</a>
         </div>
+    </form>
+
+    <section class="content" aria-label="Results">
 
         <?php if ($search === '' && ($yearFrom > 0 || $yearTo > 0 || $rating !== '')): ?>
             <div class="active-filters" aria-label="Active filters">
@@ -290,39 +299,19 @@ require __DIR__ . '/includes/header.php';
                                 <span class="card__badge card__badge--<?= Security::escape($itemType) ?>">
                                     <?= Security::escape($typeLabel) ?>
                                 </span>
+                                <div class="card__rating" aria-label="Rating: <?= Security::escape($itemRating) ?> out of 10">
+                                    <span class="card__rating-value"><?= Security::escape($itemRating) ?></span>
+                                </div>
                             </div>
 
                             <div class="card__body">
-                                <div class="card__header">
-                                    <h2 class="card__title"><?= Security::escape($title) ?></h2>
-                                    <div class="card__rating" aria-label="Rating: <?= Security::escape($itemRating) ?> out of 10">
-                                        <span class="card__rating-value"><?= Security::escape($itemRating) ?></span>
-                                        <span class="card__rating-scale">/ 10</span>
-                                    </div>
-                                </div>
-
+                                <h2 class="card__title"><?= Security::escape($title) ?></h2>
                                 <p class="card__date"><?= Security::escape($releaseDate) ?></p>
-
                                 <p class="card__overview"><?= Security::escape($overview) ?></p>
-
                                 <?php if ($itemType === 'tv'): ?>
-                                    <dl class="card__stats">
-                                        <div class="card__stat">
-                                            <dt>Seasons</dt>
-                                            <dd><?= Security::escape($seasons) ?></dd>
-                                        </div>
-                                        <div class="card__stat">
-                                            <dt>Episodes</dt>
-                                            <dd><?= Security::escape($episodes) ?></dd>
-                                        </div>
-                                    </dl>
+                                    <p class="card__meta"><?= Security::escape($seasons) ?> · <?= Security::escape($episodes) ?></p>
                                 <?php else: ?>
-                                    <dl class="card__stats">
-                                        <div class="card__stat">
-                                            <dt>Runtime</dt>
-                                            <dd><?= Security::escape($runtime) ?></dd>
-                                        </div>
-                                    </dl>
+                                    <p class="card__meta"><?= Security::escape($runtime) ?></p>
                                 <?php endif; ?>
                             </div>
                         </a>
@@ -336,7 +325,7 @@ require __DIR__ . '/includes/header.php';
                        class="btn btn--secondary">&larr; Previous</a>
                 <?php endif; ?>
                 <span class="pagination__current">Page <?= $page ?></span>
-                <?php if (count($results) >= 20): ?>
+                <?php if (count($results) >= TMDB_Service::BROWSE_PAGE_SIZE): ?>
                     <a href="?<?= buildFilterQuery(array_merge($baseQuery, ['page' => $page + 1])) ?>"
                        class="btn btn--secondary">Next &rarr;</a>
                 <?php endif; ?>

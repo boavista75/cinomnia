@@ -1,11 +1,22 @@
-# Cinomnia — Apache Security Rules
-# Deny direct web access to internal directories
+# Cinomnia — Apache Security & HTTPS Rules
+# Place this file in the web root (same folder as index.php).
 
 <IfModule mod_rewrite.c>
     RewriteEngine On
 
-    # Block access to config, source, database, and includes
-    RewriteRule ^(config|src|database|includes)/ - [F,L]
+    # ------------------------------------------------------------------
+    # Force HTTPS (301) — InfinityFree / Cloudflare compatible
+    # Skip local development hosts without SSL.
+    # ------------------------------------------------------------------
+    RewriteCond %{HTTP_HOST} !^localhost [NC]
+    RewriteCond %{HTTP_HOST} !^127\.0\.0\.1$
+    RewriteCond %{HTTP:X-Forwarded-Proto} !https
+    RewriteCond %{HTTPS} off
+    RewriteCond %{HTTP:CF-Visitor} !{"scheme":"https"}
+    RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+    # Block direct web access to internal directories
+    RewriteRule ^(config|src|database|includes|data)/ - [F,L]
 </IfModule>
 
 # Disable directory listing
@@ -15,3 +26,8 @@ Options -Indexes
 <FilesMatch "^\.">
     Require all denied
 </FilesMatch>
+
+# Prefer HTTPS for subsequent visits when the connection is already secure
+<IfModule mod_headers.c>
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains" env=HTTPS
+</IfModule>

@@ -5,7 +5,7 @@ declare(strict_types=1);
 /**
  * Cinomnia User Actions API
  *
- * Authenticated JSON endpoint for custom lists, ratings, and watched status.
+ * Authenticated JSON endpoint for custom lists, ratings, watched status, and notes.
  * Lives at the app root so it shares the same session cookie path as other pages.
  */
 
@@ -76,7 +76,7 @@ switch ($action) {
     case 'add_to_list':
         $listId = (int) postParam('list_id', '0');
 
-        if ($customLists->isWatchedList($userId, $listId) || $customLists->isRatedList($userId, $listId)) {
+        if ($customLists->isSystemList($userId, $listId)) {
             jsonResponse(['success' => false, 'message' => 'This list is managed automatically.']);
         }
 
@@ -141,12 +141,16 @@ switch ($action) {
         $watched = filter_var(postParam('is_watched', '0'), FILTER_VALIDATE_BOOLEAN);
         jsonResponse($userMedia->setWatched($userId, $tmdbId, $mediaType, $watched, $title, $poster));
 
+    case 'toggle_want_to_watch':
+        jsonResponse($userMedia->toggleWantToWatch($userId, $tmdbId, $mediaType, $title, $poster));
+
     case 'get_interaction':
         jsonResponse([
-            'success'     => true,
-            'interaction' => $userMedia->getInteraction($userId, $tmdbId, $mediaType),
-            'list_ids'    => $customLists->getListIdsContainingItem($userId, $tmdbId, $mediaType),
-            'lists'       => $customLists->getSelectableListsForUser($userId),
+            'success'          => true,
+            'interaction'      => $userMedia->getInteraction($userId, $tmdbId, $mediaType),
+            'list_ids'         => $customLists->getListIdsContainingItem($userId, $tmdbId, $mediaType),
+            'lists'            => $customLists->getSelectableListsForUser($userId),
+            'in_want_to_watch' => $customLists->isItemInWantToWatchList($userId, $tmdbId, $mediaType),
         ]);
 
     case 'get_history':
@@ -155,6 +159,15 @@ switch ($action) {
             'success' => true,
             'history' => $userMedia->getHistoryForUser($userId, $limit > 0 ? $limit : null),
         ]);
+
+    case 'get_note':
+        jsonResponse([
+            'success' => true,
+            'note'    => $notes->getNote($tmdbId, $mediaType),
+        ]);
+
+    case 'save_note':
+        jsonResponse($notes->saveNote($tmdbId, $mediaType, postParam('body')));
 
     default:
         jsonResponse(['success' => false, 'message' => 'Unknown action.'], 400);

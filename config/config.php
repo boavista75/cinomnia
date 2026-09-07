@@ -5,10 +5,10 @@ declare(strict_types=1);
 /**
  * Cinomnia - Global Application Configuration
  *
- * Central configuration file for database credentials, TMDB API settings,
+ * Central configuration file for owner login, TMDB API settings,
  * and session security parameters. Loaded once via bootstrap.php.
  *
- * Secrets (DB_*, TMDB_API_KEY) are loaded from a .env file in the project root.
+ * Secrets (APP_PASSWORD_HASH, TMDB_API_KEY) are loaded from a .env file in the project root.
  * Copy .env.example to .env and fill in your values — never commit .env.
  */
 
@@ -87,21 +87,25 @@ function cinomniaEnv(string $key, string $default = ''): string
 cinomniaLoadEnv(dirname(__DIR__) . '/.env');
 
 // ---------------------------------------------------------------------------
-// Database (MySQL via LAMPP default credentials)
-// ---------------------------------------------------------------------------
-define('DB_HOST',    cinomniaEnv('DB_HOST', 'localhost'));
-define('DB_NAME',    cinomniaEnv('DB_NAME', 'cinomnia'));
-define('DB_USER',    cinomniaEnv('DB_USER', 'root'));
-define('DB_PASS',    cinomniaEnv('DB_PASS', ''));
-define('DB_CHARSET', cinomniaEnv('DB_CHARSET', 'utf8mb4'));
-
-// ---------------------------------------------------------------------------
 // TMDB API (The Movie Database)
 // https://developer.themoviedb.org/docs
 // ---------------------------------------------------------------------------
 define('TMDB_API_KEY', cinomniaEnv('TMDB_API_KEY'));
 define('TMDB_BASE_URL', 'https://api.themoviedb.org/3');
 define('TMDB_IMG_BASE', 'https://image.tmdb.org/t/p');
+
+// Free shared hosts (e.g. InfinityFree) often lack an up-to-date CA bundle.
+// Set TMDB_SSL_VERIFY=false in .env if cURL fails with SSL certificate errors.
+define(
+    'TMDB_SSL_VERIFY',
+    !in_array(strtolower(cinomniaEnv('TMDB_SSL_VERIFY', 'true')), ['0', 'false', 'off', 'no'], true)
+);
+
+// Show detailed errors in the UI when diagnosing hosting issues.
+define(
+    'APP_DEBUG',
+    in_array(strtolower(cinomniaEnv('APP_DEBUG', 'false')), ['1', 'true', 'on', 'yes'], true)
+);
 
 if (TMDB_API_KEY === '') {
     throw new RuntimeException(
@@ -120,6 +124,20 @@ const TMDB_BACKDROP_SIZE = 'w1280';
 const APP_NAME = 'Cinomnia';
 const APP_ROOT = __DIR__ . '/..';
 
+// ---------------------------------------------------------------------------
+// Single-owner login (no database, no registration)
+// ---------------------------------------------------------------------------
+define('APP_USERNAME', cinomniaEnv('APP_USERNAME'));
+define('APP_PASSWORD_HASH', cinomniaEnv('APP_PASSWORD_HASH'));
+define('APP_PASSWORD', cinomniaEnv('APP_PASSWORD'));
+define('DATA_STORE_PATH', APP_ROOT . '/data/store.json');
+
+if (APP_USERNAME === '' || (APP_PASSWORD_HASH === '' && APP_PASSWORD === '')) {
+    throw new RuntimeException(
+        'Owner login is not set. Copy .env.example to .env and set APP_USERNAME plus APP_PASSWORD or APP_PASSWORD_HASH.'
+    );
+}
+
 /**
  * Application web root (always the project folder, not the current script subfolder).
  * Ensures session cookies and asset URLs stay consistent for pages and /api/* endpoints.
@@ -135,6 +153,35 @@ define('BASE_URL', $baseDir ?: '');
 
 /** Session cookie path — always the app root so pages and API share one session. */
 define('SESSION_COOKIE_PATH', BASE_URL !== '' ? BASE_URL : '/');
+
+/**
+ * Detect HTTPS behind direct TLS or reverse proxies (InfinityFree / Cloudflare).
+ */
+function cinomniaIsHttps(): bool
+{
+    $https = $_SERVER['HTTPS'] ?? '';
+    if ($https !== '' && strtolower((string) $https) !== 'off') {
+        return true;
+    }
+
+    if ((string) ($_SERVER['SERVER_PORT'] ?? '') === '443') {
+        return true;
+    }
+
+    $forwarded = strtolower((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''));
+    if ($forwarded === 'https') {
+        return true;
+    }
+
+    $cfVisitor = (string) ($_SERVER['HTTP_CF_VISITOR'] ?? '');
+    if (str_contains($cfVisitor, '"scheme":"https"')) {
+        return true;
+    }
+
+    return false;
+}
+
+define('APP_IS_HTTPS', cinomniaIsHttps());
 
 // ---------------------------------------------------------------------------
 // Session security settings

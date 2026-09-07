@@ -4,26 +4,42 @@ declare(strict_types=1);
 
 namespace Cinomnia\Auth;
 
-use Cinomnia\Database\Database;
-use PDO;
-use PDOException;
+use Cinomnia\Storage\JsonStore;
 
 /**
- * CustomListService — CRUD for user-owned lists and their TMDB items.
+ * CustomListService — CRUD for owner lists and their TMDB items (JSON store).
  */
 final class CustomListService
 {
-    /** System-managed list synced when users mark titles as watched. */
-    public const WATCHED_LIST_NAME = 'watched';
-
-    /** System-managed list synced when users rate titles locally. */
-    public const RATED_LIST_NAME = 'You Have Rated';
-
-    private ?UserRatingsHistoryService $ratingsHistory = null;
+    public const WATCHED_LIST_NAME        = 'watched';
+    public const RATED_LIST_NAME          = 'You Have Rated';
+    public const WANT_TO_WATCH_LIST_NAME  = 'Want to Watch';
 
     /**
-     * Breaks the construction cycle: UserRatingsHistoryService depends on this service.
+     * @return list<string>
      */
+    public static function systemListNames(): array
+    {
+        return [
+            self::WANT_TO_WATCH_LIST_NAME,
+            self::WATCHED_LIST_NAME,
+            self::RATED_LIST_NAME,
+        ];
+    }
+
+    public static function isSystemListName(string $name): bool
+    {
+        return in_array($name, self::systemListNames(), true);
+    }
+
+    private JsonStore $store;
+    private ?UserRatingsHistoryService $ratingsHistory = null;
+
+    public function __construct(JsonStore $store)
+    {
+        $this->store = $store;
+    }
+
     public function setRatingsHistoryService(UserRatingsHistoryService $ratingsHistory): void
     {
         $this->ratingsHistory = $ratingsHistory;
@@ -34,6 +50,7 @@ final class CustomListService
      */
     public function createList(int $userId, string $name): array
     {
+        unset($userId);
         $name = $this->normalizeListName($name);
 
         if ($name === '') {
@@ -44,27 +61,29 @@ final class CustomListService
             return ['success' => false, 'message' => 'List name must be 100 characters or fewer.'];
         }
 
-        $pdo = Database::getConnection();
-
-        try {
-            $stmt = $pdo->prepare(
-                'INSERT INTO custom_lists (user_id, name, created_at, updated_at)
-                 VALUES (:user_id, :name, NOW(), NOW())'
-            );
-            $stmt->execute(['user_id' => $userId, 'name' => $name]);
-        } catch (PDOException $e) {
-            if ($this->isDuplicateKey($e)) {
+        return $this->store->mutate(function (array &$data) use ($name): array {
+            if ($this->findListIdByNameIn($data, $name) !== null) {
                 return ['success' => false, 'message' => 'You already have a list with that name.'];
             }
 
-            throw $e;
-        }
+            $listId = (int) $data['next_list_id'];
+            $now    = JsonStore::now();
 
-        return [
-            'success' => true,
-            'message' => 'List created successfully.',
-            'list_id' => (int) $pdo->lastInsertId(),
-        ];
+            $data['lists'][] = [
+                'id'         => $listId,
+                'name'       => $name,
+                'created_at' => $now,
+                'updated_at' => $now,
+                'items'      => [],
+            ];
+            $data['next_list_id'] = $listId + 1;
+
+            return [
+                'success' => true,
+                'message' => 'List created successfully.',
+                'list_id' => $listId,
+            ];
+        });
     }
 
     /**
@@ -72,16 +91,18 @@ final class CustomListService
      */
     public function renameList(int $userId, int $listId, string $name): array
     {
-        if (!$this->userOwnsList($userId, $listId)) {
-            return ['success' => false, 'message' => 'List not found.'];
-        }
+        unset($userId);
 
-        if ($this->isWatchedList($userId, $listId)) {
+        if ($this->isWatchedList(0, $listId)) {
             return ['success' => false, 'message' => 'The watched list cannot be renamed.'];
         }
 
-        if ($this->isRatedList($userId, $listId)) {
+        if ($this->isRatedList(0, $listId)) {
             return ['success' => false, 'message' => 'The rated list cannot be renamed.'];
+        }
+
+        if ($this->isWantToWatchList(0, $listId)) {
+            return ['success' => false, 'message' => 'The Want to Watch list cannot be renamed.'];
         }
 
         $name = $this->normalizeListName($name);
@@ -94,23 +115,23 @@ final class CustomListService
             return ['success' => false, 'message' => 'List name must be 100 characters or fewer.'];
         }
 
-        $pdo = Database::getConnection();
+        return $this->store->mutate(function (array &$data) use ($listId, $name): array {
+            $index = $this->findListIndex($data, $listId);
 
-        try {
-            $stmt = $pdo->prepare(
-                'UPDATE custom_lists SET name = :name, updated_at = NOW()
-                 WHERE id = :list_id AND user_id = :user_id'
-            );
-            $stmt->execute(['name' => $name, 'list_id' => $listId, 'user_id' => $userId]);
-        } catch (PDOException $e) {
-            if ($this->isDuplicateKey($e)) {
+            if ($index === null) {
+                return ['success' => false, 'message' => 'List not found.'];
+            }
+
+            $existingId = $this->findListIdByNameIn($data, $name);
+            if ($existingId !== null && $existingId !== $listId) {
                 return ['success' => false, 'message' => 'You already have a list with that name.'];
             }
 
-            throw $e;
-        }
+            $data['lists'][$index]['name']       = $name;
+            $data['lists'][$index]['updated_at'] = JsonStore::now();
 
-        return ['success' => true, 'message' => 'List renamed successfully.'];
+            return ['success' => true, 'message' => 'List renamed successfully.'];
+        });
     }
 
     /**
@@ -118,48 +139,44 @@ final class CustomListService
      */
     public function deleteList(int $userId, int $listId): array
     {
-        if (!$this->userOwnsList($userId, $listId)) {
-            return ['success' => false, 'message' => 'List not found.'];
-        }
+        unset($userId);
 
-        if ($this->isWatchedList($userId, $listId)) {
+        if ($this->isWatchedList(0, $listId)) {
             return ['success' => false, 'message' => 'The watched list cannot be deleted.'];
         }
 
-        if ($this->isRatedList($userId, $listId)) {
+        if ($this->isRatedList(0, $listId)) {
             return ['success' => false, 'message' => 'The rated list cannot be deleted.'];
         }
 
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare('DELETE FROM custom_lists WHERE id = :list_id AND user_id = :user_id');
-        $stmt->execute(['list_id' => $listId, 'user_id' => $userId]);
+        if ($this->isWantToWatchList(0, $listId)) {
+            return ['success' => false, 'message' => 'The Want to Watch list cannot be deleted.'];
+        }
 
-        return ['success' => true, 'message' => 'List deleted successfully.'];
+        return $this->store->mutate(function (array &$data) use ($listId): array {
+            $index = $this->findListIndex($data, $listId);
+
+            if ($index === null) {
+                return ['success' => false, 'message' => 'List not found.'];
+            }
+
+            array_splice($data['lists'], $index, 1);
+
+            return ['success' => true, 'message' => 'List deleted successfully.'];
+        });
     }
 
     /**
-     * @return list<array{id: int, name: string, item_count: int, created_at: string, updated_at: string}>
-     */
-    /**
-     * Lists the user can manually add titles to (excludes auto-managed system lists).
-     *
      * @return list<array{id: int, name: string, item_count: int, created_at: string, updated_at: string}>
      */
     public function getSelectableListsForUser(int $userId): array
     {
         return array_values(array_filter(
             $this->getListsForUser($userId),
-            static fn(array $list): bool => !in_array(
-                $list['name'],
-                [self::WATCHED_LIST_NAME, self::RATED_LIST_NAME],
-                true
-            )
+            static fn(array $list): bool => !self::isSystemListName($list['name'])
         ));
     }
 
-    /**
-     * Find or create the user's system "watched" list.
-     */
     public function getOrCreateWatchedList(int $userId): int
     {
         $existingId = $this->findListIdByName($userId, self::WATCHED_LIST_NAME);
@@ -171,7 +188,6 @@ final class CustomListService
         $result = $this->createList($userId, self::WATCHED_LIST_NAME);
 
         if (!$result['success'] || !isset($result['list_id'])) {
-            // Race: another request may have created it between check and insert.
             $existingId = $this->findListIdByName($userId, self::WATCHED_LIST_NAME);
 
             if ($existingId !== null) {
@@ -198,9 +214,6 @@ final class CustomListService
         $this->addItem($userId, $listId, $tmdbId, $mediaType, $title, $posterPath);
     }
 
-    /**
-     * Find or create the user's system "You Have Rated" list.
-     */
     public function getOrCreateRatedList(int $userId): int
     {
         $existingId = $this->findListIdByName($userId, self::RATED_LIST_NAME);
@@ -243,22 +256,8 @@ final class CustomListService
      */
     public function syncRatedListRemove(int $userId, int $tmdbId, string $mediaType): void
     {
-        $listId = $this->findListIdByName($userId, self::RATED_LIST_NAME);
-
-        if ($listId === null) {
-            return;
-        }
-
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'DELETE FROM list_items
-             WHERE list_id = :list_id AND tmdb_id = :tmdb_id AND media_type = :media_type'
-        );
-        $stmt->execute([
-            'list_id'    => $listId,
-            'tmdb_id'    => $tmdbId,
-            'media_type' => $mediaType,
-        ]);
+        unset($userId);
+        $this->removeItemByName(self::RATED_LIST_NAME, $tmdbId, $mediaType);
     }
 
     /**
@@ -266,22 +265,68 @@ final class CustomListService
      */
     public function syncWatchedListRemove(int $userId, int $tmdbId, string $mediaType): void
     {
-        $listId = $this->findListIdByName($userId, self::WATCHED_LIST_NAME);
+        unset($userId);
+        $this->removeItemByName(self::WATCHED_LIST_NAME, $tmdbId, $mediaType);
+    }
 
-        if ($listId === null) {
-            return;
+    public function getOrCreateWantToWatchList(int $userId): int
+    {
+        $existingId = $this->findListIdByName($userId, self::WANT_TO_WATCH_LIST_NAME);
+
+        if ($existingId !== null) {
+            return $existingId;
         }
 
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'DELETE FROM list_items
-             WHERE list_id = :list_id AND tmdb_id = :tmdb_id AND media_type = :media_type'
-        );
-        $stmt->execute([
-            'list_id'    => $listId,
-            'tmdb_id'    => $tmdbId,
-            'media_type' => $mediaType,
-        ]);
+        $result = $this->createList($userId, self::WANT_TO_WATCH_LIST_NAME);
+
+        if (!$result['success'] || !isset($result['list_id'])) {
+            $existingId = $this->findListIdByName($userId, self::WANT_TO_WATCH_LIST_NAME);
+
+            if ($existingId !== null) {
+                return $existingId;
+            }
+
+            throw new \RuntimeException($result['message'] ?? 'Could not create Want to Watch list.');
+        }
+
+        return (int) $result['list_id'];
+    }
+
+    /**
+     * @param 'movie'|'tv' $mediaType
+     */
+    public function syncWantToWatchListAdd(
+        int $userId,
+        int $tmdbId,
+        string $mediaType,
+        ?string $title = null,
+        ?string $posterPath = null
+    ): void {
+        $listId = $this->getOrCreateWantToWatchList($userId);
+        $this->addItem($userId, $listId, $tmdbId, $mediaType, $title, $posterPath);
+    }
+
+    /**
+     * @param 'movie'|'tv' $mediaType
+     */
+    public function syncWantToWatchListRemove(int $userId, int $tmdbId, string $mediaType): void
+    {
+        unset($userId);
+        $this->removeItemByName(self::WANT_TO_WATCH_LIST_NAME, $tmdbId, $mediaType);
+    }
+
+    /**
+     * @param 'movie'|'tv' $mediaType
+     */
+    public function isItemInWantToWatchList(int $userId, int $tmdbId, string $mediaType): bool
+    {
+        $listId = $this->findListIdByName($userId, self::WANT_TO_WATCH_LIST_NAME);
+
+        if ($listId === null) {
+            return false;
+        }
+
+        return $this->isItemInList($listId, $tmdbId, $mediaType);
     }
 
     /**
@@ -313,7 +358,7 @@ final class CustomListService
                 continue;
             }
 
-            if ($this->isWatchedList($userId, $listId) || $this->isRatedList($userId, $listId)) {
+            if ($this->isSystemList($userId, $listId)) {
                 continue;
             }
 
@@ -353,14 +398,18 @@ final class CustomListService
         ?string $title = null,
         ?string $posterPath = null
     ): array {
+        if (self::isSystemListName($this->normalizeListName($name))) {
+            return ['success' => false, 'message' => 'That list is managed automatically.'];
+        }
+
         $createResult = $this->createList($userId, $name);
 
         if (!$createResult['success'] || !isset($createResult['list_id'])) {
             return $createResult;
         }
 
-        $listId     = (int) $createResult['list_id'];
-        $addResult  = $this->addItem($userId, $listId, $tmdbId, $mediaType, $title, $posterPath);
+        $listId    = (int) $createResult['list_id'];
+        $addResult = $this->addItem($userId, $listId, $tmdbId, $mediaType, $title, $posterPath);
 
         return [
             'success'        => true,
@@ -371,93 +420,79 @@ final class CustomListService
     }
 
     /**
-     * Recent items grouped by list for dashboard poster previews.
-     *
      * @return array<int, list<array<string, mixed>>>
      */
     public function getPreviewItemsByList(int $userId, int $limitPerList = 5): array
     {
+        unset($userId);
+
         if ($limitPerList < 1) {
             return [];
         }
 
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'SELECT li.list_id, li.tmdb_id, li.media_type, li.title, li.poster_path, li.added_at
-             FROM list_items li
-             INNER JOIN custom_lists cl ON cl.id = li.list_id
-             WHERE cl.user_id = :user_id
-             ORDER BY li.list_id ASC, li.added_at DESC'
-        );
-        $stmt->execute(['user_id' => $userId]);
-
         $grouped = [];
 
-        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $listId = (int) $row['list_id'];
+        foreach ($this->store->read()['lists'] as $list) {
+            $listId = (int) ($list['id'] ?? 0);
+            $items  = $list['items'] ?? [];
 
-            if (!isset($grouped[$listId])) {
-                $grouped[$listId] = [];
-            }
+            usort($items, static fn(array $a, array $b): int =>
+                strcmp((string) ($b['added_at'] ?? ''), (string) ($a['added_at'] ?? '')));
 
-            if (count($grouped[$listId]) >= $limitPerList) {
-                continue;
-            }
-
-            $grouped[$listId][] = $row;
+            $grouped[$listId] = array_slice($items, 0, $limitPerList);
         }
 
         return $grouped;
     }
 
+    /**
+     * @return list<array{id: int, name: string, item_count: int, created_at: string, updated_at: string}>
+     */
     public function getListsForUser(int $userId): array
     {
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'SELECT cl.id, cl.name, cl.created_at, cl.updated_at,
-                    COUNT(li.id) AS item_count
-             FROM custom_lists cl
-             LEFT JOIN list_items li ON li.list_id = cl.id
-             WHERE cl.user_id = :user_id
-             GROUP BY cl.id, cl.name, cl.created_at, cl.updated_at
-             ORDER BY cl.updated_at DESC, cl.name ASC'
-        );
-        $stmt->execute(['user_id' => $userId]);
+        unset($userId);
 
         $lists = [];
 
-        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        foreach ($this->store->read()['lists'] as $row) {
             $lists[] = [
                 'id'         => (int) $row['id'],
-                'name'       => $row['name'],
-                'item_count' => (int) $row['item_count'],
-                'created_at' => $row['created_at'],
-                'updated_at' => $row['updated_at'],
+                'name'       => (string) $row['name'],
+                'item_count' => count($row['items'] ?? []),
+                'created_at' => (string) $row['created_at'],
+                'updated_at' => (string) $row['updated_at'],
             ];
         }
+
+        usort($lists, static function (array $a, array $b): int {
+            $cmp = strcmp($b['updated_at'], $a['updated_at']);
+
+            return $cmp !== 0 ? $cmp : strcasecmp($a['name'], $b['name']);
+        });
 
         return $lists;
     }
 
     /**
-     * @return list<array<string, mixed>>|null Null when the list does not belong to the user.
+     * @return list<array<string, mixed>>|null
      */
     public function getListItems(int $userId, int $listId): ?array
     {
-        if (!$this->userOwnsList($userId, $listId)) {
-            return null;
+        unset($userId);
+
+        foreach ($this->store->read()['lists'] as $list) {
+            if ((int) $list['id'] !== $listId) {
+                continue;
+            }
+
+            $items = $list['items'] ?? [];
+            usort($items, static fn(array $a, array $b): int =>
+                strcmp((string) ($b['added_at'] ?? ''), (string) ($a['added_at'] ?? '')));
+
+            return array_values($items);
         }
 
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'SELECT id, tmdb_id, media_type, title, poster_path, added_at
-             FROM list_items
-             WHERE list_id = :list_id
-             ORDER BY added_at DESC'
-        );
-        $stmt->execute(['list_id' => $listId]);
-
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return null;
     }
 
     /**
@@ -472,6 +507,8 @@ final class CustomListService
         ?string $title = null,
         ?string $posterPath = null
     ): array {
+        unset($userId);
+
         if (!$this->isValidMediaType($mediaType)) {
             return ['success' => false, 'message' => 'Invalid media type.'];
         }
@@ -480,36 +517,37 @@ final class CustomListService
             return ['success' => false, 'message' => 'Invalid TMDB ID.'];
         }
 
-        if (!$this->userOwnsList($userId, $listId)) {
-            return ['success' => false, 'message' => 'List not found.'];
-        }
+        return $this->store->mutate(function (array &$data) use ($listId, $tmdbId, $mediaType, $title, $posterPath): array {
+            $index = $this->findListIndex($data, $listId);
 
-        if ($this->isItemInList($listId, $tmdbId, $mediaType)) {
-            return [
-                'success'        => true,
-                'message'        => 'This title is already in the list.',
-                'already_exists' => true,
+            if ($index === null) {
+                return ['success' => false, 'message' => 'List not found.'];
+            }
+
+            foreach ($data['lists'][$index]['items'] as $item) {
+                if ((int) $item['tmdb_id'] === $tmdbId && ($item['media_type'] ?? '') === $mediaType) {
+                    return [
+                        'success'        => true,
+                        'message'        => 'This title is already in the list.',
+                        'already_exists' => true,
+                    ];
+                }
+            }
+
+            $itemId = (int) $data['next_item_id'];
+            $data['lists'][$index]['items'][] = [
+                'id'          => $itemId,
+                'tmdb_id'     => $tmdbId,
+                'media_type'  => $mediaType,
+                'title'       => $title,
+                'poster_path' => $posterPath,
+                'added_at'    => JsonStore::now(),
             ];
-        }
+            $data['next_item_id'] = $itemId + 1;
+            $data['lists'][$index]['updated_at'] = JsonStore::now();
 
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'INSERT INTO list_items (list_id, tmdb_id, media_type, title, poster_path, added_at)
-             VALUES (:list_id, :tmdb_id, :media_type, :title, :poster_path, NOW())'
-        );
-        $stmt->execute([
-            'list_id'     => $listId,
-            'tmdb_id'     => $tmdbId,
-            'media_type'  => $mediaType,
-            'title'       => $title,
-            'poster_path' => $posterPath,
-        ]);
-
-        $pdo->prepare(
-            'UPDATE custom_lists SET updated_at = NOW() WHERE id = :list_id'
-        )->execute(['list_id' => $listId]);
-
-        return ['success' => true, 'message' => 'Added to your list.'];
+            return ['success' => true, 'message' => 'Added to your list.'];
+        });
     }
 
     /**
@@ -522,66 +560,91 @@ final class CustomListService
             return ['success' => false, 'message' => 'Invalid media type.'];
         }
 
-        if (!$this->userOwnsList($userId, $listId)) {
-            return ['success' => false, 'message' => 'List not found.'];
+        $removedFromWatched = false;
+        $removedFromRated   = false;
+
+        $result = $this->store->mutate(function (array &$data) use ($listId, $tmdbId, $mediaType, &$removedFromWatched, &$removedFromRated): array {
+            $index = $this->findListIndex($data, $listId);
+
+            if ($index === null) {
+                return ['success' => false, 'message' => 'List not found.'];
+            }
+
+            $before = count($data['lists'][$index]['items']);
+            $data['lists'][$index]['items'] = array_values(array_filter(
+                $data['lists'][$index]['items'],
+                static fn(array $item): bool =>
+                    !((int) $item['tmdb_id'] === $tmdbId && ($item['media_type'] ?? '') === $mediaType)
+            ));
+
+            if (count($data['lists'][$index]['items']) === $before) {
+                return ['success' => false, 'message' => 'Title was not in that list.'];
+            }
+
+            $data['lists'][$index]['updated_at'] = JsonStore::now();
+            $listName = (string) $data['lists'][$index]['name'];
+            $removedFromWatched = $listName === self::WATCHED_LIST_NAME;
+            $removedFromRated   = $listName === self::RATED_LIST_NAME;
+
+            return ['success' => true, 'message' => 'Removed from your list.'];
+        });
+
+        if ($result['success'] && $this->ratingsHistory !== null) {
+            if ($removedFromWatched) {
+                $this->ratingsHistory->clearWatchedStatus($userId, $tmdbId, $mediaType);
+            }
+            if ($removedFromRated) {
+                $this->ratingsHistory->clearRatingStatus($userId, $tmdbId, $mediaType);
+            }
         }
 
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'DELETE FROM list_items
-             WHERE list_id = :list_id AND tmdb_id = :tmdb_id AND media_type = :media_type'
-        );
-        $stmt->execute([
-            'list_id'    => $listId,
-            'tmdb_id'    => $tmdbId,
-            'media_type' => $mediaType,
-        ]);
-
-        if ($stmt->rowCount() === 0) {
-            return ['success' => false, 'message' => 'Title was not in that list.'];
-        }
-
-        $pdo->prepare(
-            'UPDATE custom_lists SET updated_at = NOW() WHERE id = :list_id'
-        )->execute(['list_id' => $listId]);
-
-        if ($this->isWatchedList($userId, $listId) && $this->ratingsHistory !== null) {
-            $this->ratingsHistory->clearWatchedStatus($userId, $tmdbId, $mediaType);
-        }
-
-        if ($this->isRatedList($userId, $listId) && $this->ratingsHistory !== null) {
-            $this->ratingsHistory->clearRatingStatus($userId, $tmdbId, $mediaType);
-        }
-
-        return ['success' => true, 'message' => 'Removed from your list.'];
+        return $result;
     }
 
     public function isWatchedList(int $userId, int $listId): bool
     {
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'SELECT name FROM custom_lists
-             WHERE id = :list_id AND user_id = :user_id
-             LIMIT 1'
-        );
-        $stmt->execute(['list_id' => $listId, 'user_id' => $userId]);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        unset($userId);
 
-        return ($row['name'] ?? '') === self::WATCHED_LIST_NAME;
+        foreach ($this->store->read()['lists'] as $list) {
+            if ((int) $list['id'] === $listId) {
+                return ($list['name'] ?? '') === self::WATCHED_LIST_NAME;
+            }
+        }
+
+        return false;
     }
 
     public function isRatedList(int $userId, int $listId): bool
     {
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'SELECT name FROM custom_lists
-             WHERE id = :list_id AND user_id = :user_id
-             LIMIT 1'
-        );
-        $stmt->execute(['list_id' => $listId, 'user_id' => $userId]);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        unset($userId);
 
-        return ($row['name'] ?? '') === self::RATED_LIST_NAME;
+        foreach ($this->store->read()['lists'] as $list) {
+            if ((int) $list['id'] === $listId) {
+                return ($list['name'] ?? '') === self::RATED_LIST_NAME;
+            }
+        }
+
+        return false;
+    }
+
+    public function isWantToWatchList(int $userId, int $listId): bool
+    {
+        unset($userId);
+
+        foreach ($this->store->read()['lists'] as $list) {
+            if ((int) $list['id'] === $listId) {
+                return ($list['name'] ?? '') === self::WANT_TO_WATCH_LIST_NAME;
+            }
+        }
+
+        return false;
+    }
+
+    public function isSystemList(int $userId, int $listId): bool
+    {
+        return $this->isWatchedList($userId, $listId)
+            || $this->isRatedList($userId, $listId)
+            || $this->isWantToWatchList($userId, $listId);
     }
 
     /**
@@ -589,70 +652,110 @@ final class CustomListService
      */
     public function isItemInList(int $listId, int $tmdbId, string $mediaType): bool
     {
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'SELECT id FROM list_items
-             WHERE list_id = :list_id AND tmdb_id = :tmdb_id AND media_type = :media_type
-             LIMIT 1'
-        );
-        $stmt->execute([
-            'list_id'    => $listId,
-            'tmdb_id'    => $tmdbId,
-            'media_type' => $mediaType,
-        ]);
+        foreach ($this->store->read()['lists'] as $list) {
+            if ((int) $list['id'] !== $listId) {
+                continue;
+            }
 
-        return (bool) $stmt->fetch(PDO::FETCH_ASSOC);
+            foreach ($list['items'] ?? [] as $item) {
+                if ((int) $item['tmdb_id'] === $tmdbId && ($item['media_type'] ?? '') === $mediaType) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**
-     * Lists that already contain a given TMDB item for this user.
-     *
      * @param 'movie'|'tv' $mediaType
      * @return list<int>
      */
     public function getListIdsContainingItem(int $userId, int $tmdbId, string $mediaType): array
     {
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'SELECT li.list_id
-             FROM list_items li
-             INNER JOIN custom_lists cl ON cl.id = li.list_id
-             WHERE cl.user_id = :user_id
-               AND li.tmdb_id = :tmdb_id
-               AND li.media_type = :media_type'
-        );
-        $stmt->execute([
-            'user_id'    => $userId,
-            'tmdb_id'    => $tmdbId,
-            'media_type' => $mediaType,
-        ]);
+        unset($userId);
+        $ids = [];
 
-        return array_map(static fn(array $row): int => (int) $row['list_id'], $stmt->fetchAll(PDO::FETCH_ASSOC));
+        foreach ($this->store->read()['lists'] as $list) {
+            foreach ($list['items'] ?? [] as $item) {
+                if ((int) $item['tmdb_id'] === $tmdbId && ($item['media_type'] ?? '') === $mediaType) {
+                    $ids[] = (int) $list['id'];
+                    break;
+                }
+            }
+        }
+
+        return $ids;
     }
 
     public function userOwnsList(int $userId, int $listId): bool
     {
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'SELECT id FROM custom_lists WHERE id = :list_id AND user_id = :user_id LIMIT 1'
-        );
-        $stmt->execute(['list_id' => $listId, 'user_id' => $userId]);
+        unset($userId);
 
-        return (bool) $stmt->fetch(PDO::FETCH_ASSOC);
+        return $this->findListIndex($this->store->read(), $listId) !== null;
     }
 
     public function findListIdByName(int $userId, string $name): ?int
     {
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'SELECT id FROM custom_lists
-             WHERE user_id = :user_id AND name = :name
-             LIMIT 1'
-        );
-        $stmt->execute(['user_id' => $userId, 'name' => $name]);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        unset($userId);
 
-        return $row ? (int) $row['id'] : null;
+        return $this->findListIdByNameIn($this->store->read(), $name);
+    }
+
+    /**
+     * @param 'movie'|'tv' $mediaType
+     */
+    private function removeItemByName(string $listName, int $tmdbId, string $mediaType): void
+    {
+        $this->store->mutate(function (array &$data) use ($listName, $tmdbId, $mediaType): void {
+            $index = null;
+
+            foreach ($data['lists'] as $i => $list) {
+                if (($list['name'] ?? '') === $listName) {
+                    $index = $i;
+                    break;
+                }
+            }
+
+            if ($index === null) {
+                return;
+            }
+
+            $data['lists'][$index]['items'] = array_values(array_filter(
+                $data['lists'][$index]['items'],
+                static fn(array $item): bool =>
+                    !((int) $item['tmdb_id'] === $tmdbId && ($item['media_type'] ?? '') === $mediaType)
+            ));
+            $data['lists'][$index]['updated_at'] = JsonStore::now();
+        });
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    private function findListIdByNameIn(array $data, string $name): ?int
+    {
+        foreach ($data['lists'] ?? [] as $list) {
+            if (($list['name'] ?? '') === $name) {
+                return (int) $list['id'];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    private function findListIndex(array $data, int $listId): ?int
+    {
+        foreach ($data['lists'] ?? [] as $index => $list) {
+            if ((int) ($list['id'] ?? 0) === $listId) {
+                return (int) $index;
+            }
+        }
+
+        return null;
     }
 
     private function normalizeListName(string $name): string
@@ -666,10 +769,5 @@ final class CustomListService
     private function isValidMediaType(string $mediaType): bool
     {
         return in_array($mediaType, ['movie', 'tv'], true);
-    }
-
-    private function isDuplicateKey(PDOException $e): bool
-    {
-        return ($e->errorInfo[1] ?? 0) === 1062;
     }
 }

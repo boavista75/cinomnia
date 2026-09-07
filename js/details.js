@@ -1,5 +1,5 @@
 /**
- * Cinomnia — Details page (trailer, rating, watched, custom lists)
+ * Cinomnia — Details page (trailer, rating, watched, want to watch, custom lists)
  */
 (function () {
     'use strict';
@@ -12,6 +12,7 @@
         if (!modal) return;
         modal.hidden = false;
         modal.setAttribute('aria-hidden', 'false');
+        document.documentElement.classList.add('modal-open');
         document.body.classList.add('modal-open');
     }
 
@@ -21,6 +22,7 @@
         modal.setAttribute('aria-hidden', 'true');
 
         if (!document.querySelector('.modal:not([hidden])')) {
+            document.documentElement.classList.remove('modal-open');
             document.body.classList.remove('modal-open');
         }
     }
@@ -35,6 +37,14 @@
         });
     }
 
+    function trackSlow(promise) {
+        if (window.CinomniaLoading && typeof window.CinomniaLoading.around === 'function') {
+            return window.CinomniaLoading.around(promise);
+        }
+
+        return promise;
+    }
+
     /* ------------------------------------------------------------------ */
     /* Trailer modal                                                       */
     /* ------------------------------------------------------------------ */
@@ -43,24 +53,65 @@
     var playBtn      = document.getElementById('play-trailer-btn');
     var trailerFrame = document.getElementById('trailer-iframe');
 
+    function stopTrailer() {
+        trailerFrame = document.getElementById('trailer-iframe');
+        if (!trailerFrame) return;
+
+        try {
+            trailerFrame.contentWindow.postMessage(JSON.stringify({
+                event: 'command',
+                func: 'stopVideo',
+                args: []
+            }), '*');
+            trailerFrame.contentWindow.postMessage(JSON.stringify({
+                event: 'command',
+                func: 'pauseVideo',
+                args: []
+            }), '*');
+        } catch (err) {
+            /* YouTube frame may already be gone. */
+        }
+
+        trailerFrame.src = 'about:blank';
+
+        var blank = trailerFrame.cloneNode(false);
+        blank.removeAttribute('src');
+        blank.src = 'about:blank';
+        if (trailerFrame.parentNode) {
+            trailerFrame.parentNode.replaceChild(blank, trailerFrame);
+        }
+        trailerFrame = blank;
+    }
+
+    function closeTrailer() {
+        stopTrailer();
+        closeModal(trailerModal);
+    }
+
     if (trailerModal && trailerFrame) {
-        bindModalClose(trailerModal, 'trailer');
+        trailerModal.querySelectorAll('[data-close-modal="trailer"]').forEach(function (el) {
+            el.addEventListener('click', closeTrailer);
+        });
 
         if (playBtn) {
             playBtn.addEventListener('click', function () {
                 var key = playBtn.getAttribute('data-trailer-key');
-                if (key) {
-                    trailerFrame.src = 'https://www.youtube.com/embed/' + encodeURIComponent(key) + '?autoplay=1&rel=0';
-                    openModal(trailerModal);
-                }
+                if (!key) return;
+
+                trailerFrame = document.getElementById('trailer-iframe');
+                if (!trailerFrame) return;
+
+                trailerFrame.src = 'https://www.youtube.com/embed/' + encodeURIComponent(key)
+                    + '?autoplay=1&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&origin='
+                    + encodeURIComponent(window.location.origin);
+                openModal(trailerModal);
             });
         }
 
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape') {
-                if (!trailerModal.hidden) {
-                    trailerFrame.src = '';
-                    closeModal(trailerModal);
+                if (trailerModal && !trailerModal.hidden) {
+                    closeTrailer();
                 }
                 var listModal = document.getElementById('list-modal');
                 if (listModal && !listModal.hidden) {
@@ -68,6 +119,8 @@
                 }
             }
         });
+
+        window.addEventListener('pagehide', stopTrailer);
     }
 
     /* ------------------------------------------------------------------ */
@@ -95,15 +148,18 @@
     var state = {
         userRating: config.userRating || null,
         isWatched: !!config.isWatched,
+        isWantToWatch: !!config.isWantToWatch,
         lists: config.lists || [],
         listIdsWithItem: config.listIdsWithItem || []
     };
 
     var watchedBtn    = document.getElementById('watched-toggle-btn');
+    var wantToWatchBtn = document.getElementById('want-to-watch-btn');
     var addToListBtn  = document.getElementById('add-to-list-btn');
-    var starRating    = document.getElementById('star-rating');
+    var scorePicker   = document.getElementById('score-picker');
     var ratingValue   = document.getElementById('user-rating-value');
-    var ratingFeedback = document.getElementById('rating-feedback');
+    var ratingWord    = document.getElementById('user-rating-word');
+    var scoreDisplay  = document.querySelector('.detail-score__display');
     var panelToast    = document.getElementById('user-panel-toast');
     var listModal     = document.getElementById('list-modal');
     var listEmpty     = document.getElementById('list-modal-empty');
@@ -151,7 +207,7 @@
             });
         }
 
-        return fetch(config.apiUrl, {
+        return trackSlow(fetch(config.apiUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -162,45 +218,68 @@
             credentials: 'include'
         }).then(function (res) {
             return res.json();
-        });
+        }));
     }
 
-    function renderStars(rating, preview) {
-        if (!starRating) return;
+    function scoreWord(rating) {
+        if (!rating) return 'Not rated';
+        if (rating <= 3) return 'Poor';
+        if (rating <= 5) return 'Okay';
+        if (rating <= 7) return 'Good';
+        if (rating <= 9) return 'Great';
+        return 'Excellent';
+    }
 
-        var value = preview !== undefined ? preview : rating;
+    function scoreTone(rating) {
+        if (!rating) return 'empty';
+        if (rating <= 3) return 'low';
+        if (rating <= 5) return 'mid';
+        if (rating <= 7) return 'good';
+        if (rating <= 9) return 'great';
+        return 'top';
+    }
 
-        starRating.querySelectorAll('.star-rating__star').forEach(function (star) {
-            var starValue = parseInt(star.getAttribute('data-value'), 10);
-            star.classList.toggle('is-active', value !== null && value >= starValue);
-            star.classList.toggle('is-preview', preview !== undefined && preview >= starValue);
+    function renderScorePicker(rating, preview) {
+        if (!scorePicker) return;
+
+        scorePicker.querySelectorAll('.score-picker__btn').forEach(function (btn) {
+            var value = parseInt(btn.getAttribute('data-value'), 10);
+            var isActive = rating !== null && value === rating;
+            var isPreview = preview !== undefined && value === preview && value !== rating;
+
+            btn.classList.toggle('is-active', isActive);
+            btn.classList.toggle('is-preview', isPreview);
+            btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
         });
-
-        starRating.setAttribute('aria-valuenow', value || 0);
     }
 
     function updateRatingDisplay(rating) {
         if (ratingValue) {
-            ratingValue.textContent = rating ? rating + ' / 10' : 'Not rated';
+            ratingValue.textContent = rating ? String(rating) : '—';
         }
-        renderStars(rating);
+        if (ratingWord) {
+            ratingWord.textContent = scoreWord(rating);
+        }
+        if (scoreDisplay) {
+            scoreDisplay.className = 'detail-score__display detail-score__display--' + scoreTone(rating);
+        }
+        renderScorePicker(rating);
     }
 
     function updateWatchedDisplay(isWatched) {
         if (!watchedBtn) return;
 
+        watchedBtn.classList.toggle('is-active', isWatched);
         watchedBtn.classList.toggle('is-watched', isWatched);
         watchedBtn.setAttribute('aria-pressed', isWatched ? 'true' : 'false');
+    }
 
-        var icon  = watchedBtn.querySelector('.detail-user-panel__watched-icon');
-        var label = watchedBtn.querySelector('.detail-user-panel__watched-label');
+    function updateWantToWatchDisplay(inWantToWatch) {
+        if (!wantToWatchBtn) return;
 
-        if (icon) {
-            icon.innerHTML = isWatched ? '&#10003;' : '&#9675;';
-        }
-        if (label) {
-            label.textContent = isWatched ? 'Watched' : 'Mark as Watched';
-        }
+        wantToWatchBtn.classList.toggle('is-active', inWantToWatch);
+        wantToWatchBtn.classList.toggle('is-want', inWantToWatch);
+        wantToWatchBtn.setAttribute('aria-pressed', inWantToWatch ? 'true' : 'false');
     }
 
     function renderListChecklist() {
@@ -271,64 +350,40 @@
         });
     }
 
-    /* Star rating interactions */
-    if (starRating) {
-        var hoverRating = null;
-
-        starRating.querySelectorAll('.star-rating__star').forEach(function (star) {
-            star.addEventListener('mouseenter', function () {
-                hoverRating = parseInt(star.getAttribute('data-value'), 10);
-                renderStars(state.userRating, hoverRating);
+    /* Numeric score picker */
+    if (scorePicker) {
+        scorePicker.querySelectorAll('.score-picker__btn').forEach(function (btn) {
+            btn.addEventListener('mouseenter', function () {
+                renderScorePicker(state.userRating, parseInt(btn.getAttribute('data-value'), 10));
             });
 
-            star.addEventListener('mouseleave', function () {
-                hoverRating = null;
-                renderStars(state.userRating);
+            btn.addEventListener('mouseleave', function () {
+                renderScorePicker(state.userRating);
             });
 
-            star.addEventListener('click', function () {
-                var value = parseInt(star.getAttribute('data-value'), 10);
+            btn.addEventListener('click', function () {
+                var value = parseInt(btn.getAttribute('data-value'), 10);
+                var clearing = state.userRating === value;
+                var action = clearing ? 'clear_rating' : 'set_rating';
+                var extra = clearing ? {} : { rating: String(value) };
 
-                starRating.classList.add('is-saving');
-                if (ratingFeedback) {
-                    ratingFeedback.textContent = 'Saving…';
-                }
+                scorePicker.classList.add('is-saving');
 
-                apiRequest('set_rating', { rating: String(value) }).then(function (data) {
-                    starRating.classList.remove('is-saving');
+                apiRequest(action, extra).then(function (data) {
+                    scorePicker.classList.remove('is-saving');
 
                     if (data.success) {
-                        state.userRating = value;
-                        updateRatingDisplay(value);
-                        if (ratingFeedback) {
-                            ratingFeedback.textContent = 'Rating saved!';
-                        }
+                        state.userRating = clearing ? null : value;
+                        updateRatingDisplay(state.userRating);
                         showToast(panelToast, data.message, false);
                     } else {
-                        if (ratingFeedback) {
-                            ratingFeedback.textContent = data.message || 'Could not save rating.';
-                        }
                         showToast(panelToast, data.message || 'Could not save rating.', true);
                     }
                 }).catch(function () {
-                    starRating.classList.remove('is-saving');
-                    if (ratingFeedback) {
-                        ratingFeedback.textContent = 'Network error. Please try again.';
-                    }
+                    scorePicker.classList.remove('is-saving');
+                    showToast(panelToast, 'Network error. Please try again.', true);
                 });
             });
-        });
-
-        starRating.addEventListener('keydown', function (e) {
-            var current = state.userRating || 0;
-
-            if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
-                e.preventDefault();
-                renderStars(Math.min(10, current + 1), Math.min(10, current + 1));
-            } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
-                e.preventDefault();
-                renderStars(Math.max(1, current - 1), Math.max(1, current - 1));
-            }
         });
     }
 
@@ -342,13 +397,39 @@
 
                 if (data.success) {
                     state.isWatched = !!data.is_watched;
+                    state.isWantToWatch = !!data.in_want_to_watch;
                     updateWatchedDisplay(state.isWatched);
+                    updateWantToWatchDisplay(state.isWantToWatch);
                     showToast(panelToast, data.message, false);
                 } else {
                     showToast(panelToast, data.message || 'Could not update watched status.', true);
                 }
             }).catch(function () {
                 watchedBtn.disabled = false;
+                showToast(panelToast, 'Network error. Please try again.', true);
+            });
+        });
+    }
+
+    /* Want to Watch toggle */
+    if (wantToWatchBtn) {
+        wantToWatchBtn.addEventListener('click', function () {
+            wantToWatchBtn.disabled = true;
+
+            apiRequest('toggle_want_to_watch').then(function (data) {
+                wantToWatchBtn.disabled = false;
+
+                if (data.success) {
+                    state.isWantToWatch = !!data.in_want_to_watch;
+                    state.isWatched = !!data.is_watched;
+                    updateWantToWatchDisplay(state.isWantToWatch);
+                    updateWatchedDisplay(state.isWatched);
+                    showToast(panelToast, data.message, false);
+                } else {
+                    showToast(panelToast, data.message || 'Could not update Want to Watch.', true);
+                }
+            }).catch(function () {
+                wantToWatchBtn.disabled = false;
                 showToast(panelToast, 'Network error. Please try again.', true);
             });
         });
@@ -470,13 +551,17 @@
     } /* panel */
 
     /* ------------------------------------------------------------------ */
-    /* Comments                                                            */
+    /* Notes                                                               */
     /* ------------------------------------------------------------------ */
 
-    var commentsSection = document.getElementById('detail-comments');
-    var pageConfigEl    = document.getElementById('detail-page-config');
+    var notesSection = document.getElementById('detail-notes');
+    var pageConfigEl = document.getElementById('detail-page-config');
+    var noteForm     = document.getElementById('note-form');
+    var noteBody     = document.getElementById('note-body');
+    var noteView     = document.getElementById('note-view');
+    var noteDisplay  = document.getElementById('note-display');
 
-    if (commentsSection && pageConfigEl) {
+    if (notesSection && pageConfigEl && noteForm && noteBody) {
         var pageConfig;
 
         try {
@@ -486,312 +571,150 @@
         }
 
         if (pageConfig) {
-            var commentsList    = document.getElementById('comments-list');
-            var commentsEmpty   = document.getElementById('comments-empty');
-            var commentsLoading = document.getElementById('comments-loading');
-            var commentsFeedback = document.getElementById('comments-feedback');
-            var commentForm     = document.getElementById('comment-form');
-            var commentBody     = document.getElementById('comment-body');
-            var commentCharCount = document.getElementById('comment-char-count');
-            var commentSubmit   = document.getElementById('comment-submit-btn');
+            var noteCharCount = document.getElementById('note-char-count');
+            var noteSubmit    = document.getElementById('note-submit-btn');
+            var noteCancel    = document.getElementById('note-cancel-btn');
+            var noteEdit      = document.getElementById('note-edit-btn');
+            var noteFeedback  = document.getElementById('note-feedback');
+            var noteSavedAt   = document.getElementById('note-saved-at');
+            var noteMaxChars  = pageConfig.noteMaxChars || 8000;
+            var savedDraft    = noteBody.value;
 
-            function escapeHtml(str) {
-                return String(str)
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/"/g, '&quot;');
-            }
-
-            function getCommentCsrf() {
+            function getNoteCsrf() {
                 var el = document.getElementById('detail-csrf-token');
                 return el && el.value ? el.value : '';
             }
 
-            function showCommentsFeedback(message, isError) {
-                if (!commentsFeedback) return;
-                commentsFeedback.textContent = message;
-                commentsFeedback.hidden = false;
-                commentsFeedback.className = 'detail-comments__feedback' + (isError ? ' is-error' : ' is-success');
-                window.clearTimeout(commentsFeedback._timer);
-                commentsFeedback._timer = window.setTimeout(function () {
-                    commentsFeedback.hidden = true;
+            function updateNoteCount() {
+                if (noteCharCount) {
+                    noteCharCount.textContent = noteBody.value.length + ' / ' + noteMaxChars;
+                }
+            }
+
+            function setSavedAt(updatedAt) {
+                if (!noteSavedAt) return;
+                noteSavedAt.textContent = updatedAt ? 'Last saved ' + updatedAt : '';
+            }
+
+            function showNoteFeedback(message, isError) {
+                if (!noteFeedback) return;
+                noteFeedback.textContent = message;
+                noteFeedback.hidden = false;
+                noteFeedback.className = 'detail-notes__feedback' + (isError ? ' is-error' : ' is-success');
+                window.clearTimeout(noteFeedback._timer);
+                noteFeedback._timer = window.setTimeout(function () {
+                    noteFeedback.hidden = true;
                 }, 3500);
             }
 
-            function commentsApi(action, extra, requireAuth) {
+            function showEditor(canCancel) {
+                if (noteView) noteView.hidden = true;
+                noteForm.hidden = false;
+                if (noteCancel) noteCancel.hidden = !canCancel;
+                noteBody.focus();
+            }
+
+            function showSavedNote(body, updatedAt) {
+                savedDraft = body || '';
+                noteBody.value = savedDraft;
+                updateNoteCount();
+                setSavedAt(updatedAt);
+
+                if (noteDisplay) {
+                    noteDisplay.textContent = savedDraft;
+                }
+
+                if (savedDraft === '') {
+                    if (noteView) noteView.hidden = true;
+                    noteForm.hidden = false;
+                    if (noteCancel) noteCancel.hidden = true;
+                    return;
+                }
+
+                noteForm.hidden = true;
+                if (noteView) noteView.hidden = false;
+                if (noteCancel) noteCancel.hidden = false;
+            }
+
+            function saveNote() {
+                var csrfToken = getNoteCsrf();
+
+                if (!csrfToken) {
+                    showNoteFeedback('Missing security token. Please refresh the page.', true);
+                    return Promise.resolve();
+                }
+
+                if (noteSubmit) noteSubmit.disabled = true;
+
                 var body = new URLSearchParams();
-                body.set('action', action);
+                body.set('action', 'save_note');
+                body.set('csrf_token', csrfToken);
                 body.set('tmdb_id', String(pageConfig.tmdbId));
                 body.set('media_type', pageConfig.mediaType);
+                body.set('body', noteBody.value);
 
-                if (requireAuth) {
-                    var token = getCommentCsrf();
-                    if (!token) {
-                        return Promise.resolve({
-                            success: false,
-                            message: 'Please log in to continue.'
-                        });
-                    }
-                    body.set('csrf_token', token);
-                }
-
-                if (extra) {
-                    Object.keys(extra).forEach(function (key) {
-                        body.set(key, extra[key]);
-                    });
-                }
-
-                var headers = {
-                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    'X-Requested-With': 'XMLHttpRequest'
-                };
-
-                if (requireAuth) {
-                    headers['X-CSRF-Token'] = getCommentCsrf();
-                }
-
-                return fetch(pageConfig.commentsApiUrl, {
+                return trackSlow(fetch(pageConfig.notesApiUrl, {
                     method: 'POST',
-                    headers: headers,
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'X-CSRF-Token': csrfToken,
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
                     body: body.toString(),
                     credentials: 'include'
-                }).then(function (res) {
+                })).then(function (res) {
                     return res.json();
-                });
-            }
-
-            function formatDate(iso) {
-                if (!iso) return '';
-                var d = new Date(iso.replace(' ', 'T'));
-                if (isNaN(d.getTime())) return iso;
-                return d.toLocaleDateString(undefined, {
-                    month: 'short',
-                    day: 'numeric',
-                    year: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit'
-                });
-            }
-
-            function renderReactionButtons(comment, isReply) {
-                var likeActive  = comment.user_reaction === 1 ? ' is-active' : '';
-                var dislikeActive = comment.user_reaction === -1 ? ' is-active' : '';
-                var disabled = pageConfig.isLoggedIn ? '' : ' disabled title="Log in to vote"';
-
-                return '<div class="comment-item__reactions">' +
-                    '<button type="button" class="comment-react comment-react--like' + likeActive + '"' +
-                        ' data-comment-id="' + comment.id + '" data-reaction="1"' + disabled + '>' +
-                        '<span class="comment-react__icon" aria-hidden="true">&#9650;</span>' +
-                        '<span class="comment-react__count" data-like-count>' + comment.likes + '</span>' +
-                    '</button>' +
-                    '<button type="button" class="comment-react comment-react--dislike' + dislikeActive + '"' +
-                        ' data-comment-id="' + comment.id + '" data-reaction="-1"' + disabled + '>' +
-                        '<span class="comment-react__icon" aria-hidden="true">&#9660;</span>' +
-                        '<span class="comment-react__count" data-dislike-count>' + comment.dislikes + '</span>' +
-                    '</button>' +
-                    (!isReply && pageConfig.isLoggedIn
-                        ? '<button type="button" class="comment-reply-btn" data-reply-to="' + comment.id + '">Reply</button>'
-                        : '') +
-                '</div>';
-            }
-
-            function renderCommentItem(comment, isReply) {
-                var item = document.createElement('li');
-                item.className = 'comment-item' + (isReply ? ' comment-item--reply' : '');
-                item.setAttribute('data-comment-id', String(comment.id));
-
-                item.innerHTML =
-                    '<div class="comment-item__avatar" aria-hidden="true">' +
-                        escapeHtml((comment.username || '?').charAt(0).toUpperCase()) +
-                    '</div>' +
-                    '<div class="comment-item__body">' +
-                        '<div class="comment-item__header">' +
-                            '<strong class="comment-item__author">' + escapeHtml(comment.username) + '</strong>' +
-                            '<time class="comment-item__time" datetime="' + escapeHtml(comment.created_at) + '">' +
-                                escapeHtml(formatDate(comment.created_at)) +
-                            '</time>' +
-                        '</div>' +
-                        '<p class="comment-item__text"></p>' +
-                        renderReactionButtons(comment, isReply) +
-                        '<form class="comment-reply-form" data-reply-form="' + comment.id + '" hidden>' +
-                            '<textarea class="detail-comments__textarea detail-comments__textarea--reply" ' +
-                                'rows="2" maxlength="2000" placeholder="Write a reply…" required></textarea>' +
-                            '<div class="comment-reply-form__actions">' +
-                                '<button type="button" class="btn btn--ghost btn--sm" data-cancel-reply>Cancel</button>' +
-                                '<button type="submit" class="btn btn--accent btn--sm">Post Reply</button>' +
-                            '</div>' +
-                        '</form>' +
-                    '</div>';
-
-                item.querySelector('.comment-item__text').textContent = comment.body;
-
-                return item;
-            }
-
-            function bindCommentEvents(container) {
-                container.querySelectorAll('.comment-react:not([disabled])').forEach(function (btn) {
-                    btn.addEventListener('click', function () {
-                        var commentId = btn.getAttribute('data-comment-id');
-                        var reaction  = parseInt(btn.getAttribute('data-reaction'), 10);
-                        var item      = btn.closest('.comment-item');
-
-                        btn.disabled = true;
-
-                        commentsApi('set_reaction', {
-                            comment_id: commentId,
-                            reaction_type: btn.classList.contains('is-active') ? '0' : String(reaction)
-                        }, true).then(function (data) {
-                            btn.disabled = false;
-
-                            if (!data.success || !item) return;
-
-                            var likeBtn = item.querySelector('.comment-react--like');
-                            var dislikeBtn = item.querySelector('.comment-react--dislike');
-
-                            if (likeBtn) {
-                                likeBtn.classList.toggle('is-active', data.user_reaction === 1);
-                                likeBtn.querySelector('[data-like-count]').textContent = data.likes;
-                            }
-                            if (dislikeBtn) {
-                                dislikeBtn.classList.toggle('is-active', data.user_reaction === -1);
-                                dislikeBtn.querySelector('[data-dislike-count]').textContent = data.dislikes;
-                            }
-                        });
-                    });
-                });
-
-                container.querySelectorAll('.comment-reply-btn').forEach(function (btn) {
-                    btn.addEventListener('click', function () {
-                        var id = btn.getAttribute('data-reply-to');
-                        var form = container.querySelector('[data-reply-form="' + id + '"]');
-                        if (form) {
-                            form.hidden = false;
-                            form.querySelector('textarea').focus();
-                        }
-                    });
-                });
-
-                container.querySelectorAll('[data-cancel-reply]').forEach(function (btn) {
-                    btn.addEventListener('click', function () {
-                        var form = btn.closest('.comment-reply-form');
-                        if (form) {
-                            form.hidden = true;
-                            form.querySelector('textarea').value = '';
-                        }
-                    });
-                });
-
-                container.querySelectorAll('.comment-reply-form').forEach(function (form) {
-                    form.addEventListener('submit', function (e) {
-                        e.preventDefault();
-                        var textarea = form.querySelector('textarea');
-                        var parentId = form.getAttribute('data-reply-form');
-                        var text = textarea ? textarea.value.trim() : '';
-
-                        if (!text) return;
-
-                        form.querySelector('button[type="submit"]').disabled = true;
-
-                        commentsApi('post_comment', {
-                            body: text,
-                            parent_comment_id: parentId
-                        }, true).then(function (data) {
-                            form.querySelector('button[type="submit"]').disabled = false;
-
-                            if (data.success) {
-                                form.hidden = true;
-                                textarea.value = '';
-                                loadComments();
-                                showCommentsFeedback(data.message, false);
-                            } else {
-                                showCommentsFeedback(data.message || 'Could not post reply.', true);
-                            }
-                        });
-                    });
-                });
-            }
-
-            function renderComments(comments) {
-                if (!commentsList) return;
-
-                commentsList.innerHTML = '';
-
-                comments.forEach(function (comment) {
-                    var topItem = renderCommentItem(comment, false);
-                    commentsList.appendChild(topItem);
-
-                    if (comment.replies && comment.replies.length) {
-                        var replyList = document.createElement('ul');
-                        replyList.className = 'comment-replies';
-
-                        comment.replies.forEach(function (reply) {
-                            replyList.appendChild(renderCommentItem(reply, true));
-                        });
-
-                        topItem.querySelector('.comment-item__body').appendChild(replyList);
-                    }
-                });
-
-                bindCommentEvents(commentsList);
-
-                var hasComments = comments.length > 0;
-                commentsList.hidden = !hasComments;
-                if (commentsEmpty) commentsEmpty.hidden = hasComments;
-            }
-
-            function loadComments() {
-                if (commentsLoading) commentsLoading.hidden = false;
-                if (commentsList) commentsList.hidden = true;
-                if (commentsEmpty) commentsEmpty.hidden = true;
-
-                commentsApi('get_comments', {}, false).then(function (data) {
-                    if (commentsLoading) commentsLoading.hidden = true;
+                }).then(function (data) {
+                    if (noteSubmit) noteSubmit.disabled = false;
 
                     if (data.success) {
-                        renderComments(data.comments || []);
+                        showSavedNote(data.body || '', data.updated_at || null);
+                        showNoteFeedback(data.message || 'Notes saved.', false);
                     } else {
-                        showCommentsFeedback('Could not load comments.', true);
+                        showNoteFeedback(data.message || 'Could not save notes.', true);
                     }
                 }).catch(function () {
-                    if (commentsLoading) commentsLoading.hidden = true;
-                    showCommentsFeedback('Network error loading comments.', true);
+                    if (noteSubmit) noteSubmit.disabled = false;
+                    showNoteFeedback('Network error. Please try again.', true);
                 });
             }
 
-            if (commentForm && commentBody) {
-                commentBody.addEventListener('input', function () {
-                    if (commentCharCount) {
-                        commentCharCount.textContent = commentBody.value.length + ' / 2000';
+            noteBody.addEventListener('input', updateNoteCount);
+
+            noteForm.addEventListener('submit', function (e) {
+                e.preventDefault();
+                saveNote();
+            });
+
+            if (noteEdit) {
+                noteEdit.addEventListener('click', function () {
+                    noteBody.value = savedDraft;
+                    updateNoteCount();
+                    showEditor(savedDraft !== '');
+                });
+            }
+
+            if (noteCancel) {
+                noteCancel.addEventListener('click', function () {
+                    noteBody.value = savedDraft;
+                    updateNoteCount();
+
+                    if (savedDraft === '') {
+                        if (noteView) noteView.hidden = true;
+                        noteForm.hidden = false;
+                        noteCancel.hidden = true;
+                        return;
                     }
-                });
 
-                commentForm.addEventListener('submit', function (e) {
-                    e.preventDefault();
-                    var text = commentBody.value.trim();
-                    if (!text) return;
-
-                    if (commentSubmit) commentSubmit.disabled = true;
-
-                    commentsApi('post_comment', { body: text }, true).then(function (data) {
-                        if (commentSubmit) commentSubmit.disabled = false;
-
-                        if (data.success) {
-                            commentBody.value = '';
-                            if (commentCharCount) commentCharCount.textContent = '0 / 2000';
-                            loadComments();
-                            showCommentsFeedback(data.message, false);
-                        } else {
-                            showCommentsFeedback(data.message || 'Could not post comment.', true);
-                        }
-                    }).catch(function () {
-                        if (commentSubmit) commentSubmit.disabled = false;
-                        showCommentsFeedback('Network error. Please try again.', true);
-                    });
+                    if (noteDisplay) {
+                        noteDisplay.textContent = savedDraft;
+                    }
+                    noteForm.hidden = true;
+                    if (noteView) noteView.hidden = false;
                 });
             }
 
-            loadComments();
+            updateNoteCount();
         }
     }
 })();

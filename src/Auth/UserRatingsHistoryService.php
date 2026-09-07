@@ -4,18 +4,19 @@ declare(strict_types=1);
 
 namespace Cinomnia\Auth;
 
-use Cinomnia\Database\Database;
-use PDO;
+use Cinomnia\Storage\JsonStore;
 
 /**
- * UserRatingsHistoryService — user ratings (1–10) and watched status per TMDB item.
+ * UserRatingsHistoryService — ratings (1–10) and watched status per TMDB item.
  */
 final class UserRatingsHistoryService
 {
+    private JsonStore $store;
     private CustomListService $customLists;
 
-    public function __construct(CustomListService $customLists)
+    public function __construct(JsonStore $store, CustomListService $customLists)
     {
+        $this->store = $store;
         $this->customLists = $customLists;
     }
 
@@ -43,29 +44,25 @@ final class UserRatingsHistoryService
             return ['success' => false, 'message' => 'Rating must be between 1 and 10.'];
         }
 
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'INSERT INTO user_ratings_history
-                (user_id, tmdb_id, media_type, rating, rated_at, title, poster_path, created_at, updated_at)
-             VALUES
-                (:user_id, :tmdb_id, :media_type, :rating, NOW(), :title, :poster_path, NOW(), NOW())
-             ON DUPLICATE KEY UPDATE
-                rating      = VALUES(rating),
-                rated_at    = NOW(),
-                title       = COALESCE(VALUES(title), title),
-                poster_path = COALESCE(VALUES(poster_path), poster_path),
-                updated_at  = NOW()'
-        );
-        $stmt->execute([
-            'user_id'     => $userId,
-            'tmdb_id'     => $tmdbId,
-            'media_type'  => $mediaType,
-            'rating'      => $rating,
-            'title'       => $title,
-            'poster_path' => $posterPath,
-        ]);
+        $this->store->mutate(function (array &$data) use ($tmdbId, $mediaType, $rating, $title, $posterPath): void {
+            $key     = JsonStore::mediaKey($tmdbId, $mediaType);
+            $current = $data['ratings'][$key] ?? [];
+            $now     = JsonStore::now();
 
-        $this->syncLocalRating($userId, $tmdbId, $mediaType, $rating);
+            $data['ratings'][$key] = [
+                'tmdb_id'     => $tmdbId,
+                'media_type'  => $mediaType,
+                'rating'      => $rating,
+                'is_watched'  => (bool) ($current['is_watched'] ?? false),
+                'rated_at'    => $now,
+                'watched_at'  => $current['watched_at'] ?? null,
+                'title'       => $title ?? ($current['title'] ?? null),
+                'poster_path' => $posterPath ?? ($current['poster_path'] ?? null),
+                'created_at'  => $current['created_at'] ?? $now,
+                'updated_at'  => $now,
+            ];
+        });
+
         $this->customLists->syncRatedListAdd($userId, $tmdbId, $mediaType, $title, $posterPath);
 
         return [
@@ -85,33 +82,33 @@ final class UserRatingsHistoryService
             return ['success' => false, 'message' => 'Invalid media type.'];
         }
 
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'UPDATE user_ratings_history
-             SET rating = NULL, rated_at = NULL, updated_at = NOW()
-             WHERE user_id = :user_id AND tmdb_id = :tmdb_id AND media_type = :media_type'
-        );
-        $stmt->execute([
-            'user_id'    => $userId,
-            'tmdb_id'    => $tmdbId,
-            'media_type' => $mediaType,
-        ]);
+        $found = $this->store->mutate(function (array &$data) use ($tmdbId, $mediaType): bool {
+            $key = JsonStore::mediaKey($tmdbId, $mediaType);
 
-        if ($stmt->rowCount() === 0) {
+            if (!isset($data['ratings'][$key]) || $data['ratings'][$key]['rating'] === null) {
+                return false;
+            }
+
+            $now = JsonStore::now();
+            $data['ratings'][$key]['rating']     = null;
+            $data['ratings'][$key]['rated_at']   = null;
+            $data['ratings'][$key]['updated_at'] = $now;
+
+            return true;
+        });
+
+        if (!$found) {
             return ['success' => false, 'message' => 'No rating found for this title.'];
         }
 
-        $this->removeLocalRating($userId, $tmdbId, $mediaType);
         $this->customLists->syncRatedListRemove($userId, $tmdbId, $mediaType);
 
         return ['success' => true, 'message' => 'Rating cleared.'];
     }
 
     /**
-     * Flip watched status; creates a row if the user has not interacted with the title yet.
-     *
      * @param 'movie'|'tv' $mediaType
-     * @return array{success: bool, message: string, is_watched?: bool}
+     * @return array{success: bool, message: string, is_watched?: bool, in_want_to_watch?: bool}
      */
     public function toggleWatched(
         int $userId,
@@ -128,7 +125,7 @@ final class UserRatingsHistoryService
             return ['success' => false, 'message' => 'Invalid TMDB ID.'];
         }
 
-        $current = $this->getInteraction($userId, $tmdbId, $mediaType);
+        $current  = $this->getInteraction($userId, $tmdbId, $mediaType);
         $newState = !((bool) ($current['is_watched'] ?? false));
 
         return $this->setWatched($userId, $tmdbId, $mediaType, $newState, $title, $posterPath);
@@ -136,7 +133,7 @@ final class UserRatingsHistoryService
 
     /**
      * @param 'movie'|'tv' $mediaType
-     * @return array{success: bool, message: string, is_watched?: bool}
+     * @return array{success: bool, message: string, is_watched?: bool, in_want_to_watch?: bool}
      */
     public function setWatched(
         int $userId,
@@ -154,111 +151,109 @@ final class UserRatingsHistoryService
             return ['success' => false, 'message' => 'Invalid TMDB ID.'];
         }
 
-        $this->persistWatchedFlag($userId, $tmdbId, $mediaType, $watched, $title, $posterPath);
+        $this->persistWatchedFlag($tmdbId, $mediaType, $watched, $title, $posterPath);
 
         if ($watched) {
             $this->customLists->syncWatchedListAdd($userId, $tmdbId, $mediaType, $title, $posterPath);
+            $this->customLists->syncWantToWatchListRemove($userId, $tmdbId, $mediaType);
         } else {
             $this->customLists->syncWatchedListRemove($userId, $tmdbId, $mediaType);
         }
 
         return [
-            'success'    => true,
-            'message'    => $watched ? 'Marked as watched.' : 'Marked as not watched.',
-            'is_watched' => $watched,
+            'success'           => true,
+            'message'           => $watched ? 'Marked as watched.' : 'Marked as not watched.',
+            'is_watched'        => $watched,
+            'in_want_to_watch'  => $this->customLists->isItemInWantToWatchList($userId, $tmdbId, $mediaType),
         ];
     }
 
     /**
-     * Clears watched status after the title was removed from the watched list.
-     * Does not touch list_items (already removed by the caller).
-     *
+     * @param 'movie'|'tv' $mediaType
+     * @return array{success: bool, message: string, in_want_to_watch?: bool, is_watched?: bool}
+     */
+    public function toggleWantToWatch(
+        int $userId,
+        int $tmdbId,
+        string $mediaType,
+        ?string $title = null,
+        ?string $posterPath = null
+    ): array {
+        if (!$this->isValidMediaType($mediaType)) {
+            return ['success' => false, 'message' => 'Invalid media type.'];
+        }
+
+        if ($tmdbId <= 0) {
+            return ['success' => false, 'message' => 'Invalid TMDB ID.'];
+        }
+
+        if ($this->customLists->isItemInWantToWatchList($userId, $tmdbId, $mediaType)) {
+            $this->customLists->syncWantToWatchListRemove($userId, $tmdbId, $mediaType);
+            $interaction = $this->getInteraction($userId, $tmdbId, $mediaType);
+
+            return [
+                'success'          => true,
+                'message'          => 'Removed from Want to Watch.',
+                'in_want_to_watch' => false,
+                'is_watched'       => (bool) ($interaction['is_watched'] ?? false),
+            ];
+        }
+
+        $interaction = $this->getInteraction($userId, $tmdbId, $mediaType);
+        $wasWatched  = (bool) ($interaction['is_watched'] ?? false);
+
+        if ($wasWatched) {
+            $this->setWatched($userId, $tmdbId, $mediaType, false, $title, $posterPath);
+        }
+
+        $this->customLists->syncWantToWatchListAdd($userId, $tmdbId, $mediaType, $title, $posterPath);
+
+        return [
+            'success'          => true,
+            'message'          => $wasWatched
+                ? 'Moved from Watched to Want to Watch.'
+                : 'Added to Want to Watch.',
+            'in_want_to_watch' => true,
+            'is_watched'       => false,
+        ];
+    }
+
+    /**
      * @param 'movie'|'tv' $mediaType
      */
     public function clearWatchedStatus(int $userId, int $tmdbId, string $mediaType): void
     {
+        unset($userId);
+
         if (!$this->isValidMediaType($mediaType) || $tmdbId <= 0) {
             return;
         }
 
-        $this->persistWatchedFlag($userId, $tmdbId, $mediaType, false, null, null);
+        $this->persistWatchedFlag($tmdbId, $mediaType, false, null, null);
     }
 
     /**
-     * Clears rating after the title was removed from the rated list.
-     * Does not touch list_items (already removed by the caller).
-     *
      * @param 'movie'|'tv' $mediaType
      */
     public function clearRatingStatus(int $userId, int $tmdbId, string $mediaType): void
     {
+        unset($userId);
+
         if (!$this->isValidMediaType($mediaType) || $tmdbId <= 0) {
             return;
         }
 
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'UPDATE user_ratings_history
-             SET rating = NULL, rated_at = NULL, updated_at = NOW()
-             WHERE user_id = :user_id AND tmdb_id = :tmdb_id AND media_type = :media_type'
-        );
-        $stmt->execute([
-            'user_id'    => $userId,
-            'tmdb_id'    => $tmdbId,
-            'media_type' => $mediaType,
-        ]);
+        $this->store->mutate(function (array &$data) use ($tmdbId, $mediaType): void {
+            $key = JsonStore::mediaKey($tmdbId, $mediaType);
 
-        $this->removeLocalRating($userId, $tmdbId, $mediaType);
-    }
+            if (!isset($data['ratings'][$key])) {
+                return;
+            }
 
-    /**
-     * @param 'movie'|'tv' $mediaType
-     */
-    private function persistWatchedFlag(
-        int $userId,
-        int $tmdbId,
-        string $mediaType,
-        bool $watched,
-        ?string $title,
-        ?string $posterPath
-    ): void {
-        $pdo = Database::getConnection();
-
-        if ($watched) {
-            $stmt = $pdo->prepare(
-                'INSERT INTO user_ratings_history
-                    (user_id, tmdb_id, media_type, is_watched, watched_at, title, poster_path, created_at, updated_at)
-                 VALUES
-                    (:user_id, :tmdb_id, :media_type, 1, NOW(), :title, :poster_path, NOW(), NOW())
-                 ON DUPLICATE KEY UPDATE
-                    is_watched  = 1,
-                    watched_at  = NOW(),
-                    title       = COALESCE(VALUES(title), title),
-                    poster_path = COALESCE(VALUES(poster_path), poster_path),
-                    updated_at  = NOW()'
-            );
-        } else {
-            $stmt = $pdo->prepare(
-                'INSERT INTO user_ratings_history
-                    (user_id, tmdb_id, media_type, is_watched, watched_at, title, poster_path, created_at, updated_at)
-                 VALUES
-                    (:user_id, :tmdb_id, :media_type, 0, NULL, :title, :poster_path, NOW(), NOW())
-                 ON DUPLICATE KEY UPDATE
-                    is_watched  = 0,
-                    watched_at  = NULL,
-                    title       = COALESCE(VALUES(title), title),
-                    poster_path = COALESCE(VALUES(poster_path), poster_path),
-                    updated_at  = NOW()'
-            );
-        }
-
-        $stmt->execute([
-            'user_id'     => $userId,
-            'tmdb_id'     => $tmdbId,
-            'media_type'  => $mediaType,
-            'title'       => $title,
-            'poster_path' => $posterPath,
-        ]);
+            $data['ratings'][$key]['rating']     = null;
+            $data['ratings'][$key]['rated_at']   = null;
+            $data['ratings'][$key]['updated_at'] = JsonStore::now();
+        });
     }
 
     /**
@@ -274,36 +269,25 @@ final class UserRatingsHistoryService
      */
     public function getInteraction(int $userId, int $tmdbId, string $mediaType): ?array
     {
+        unset($userId);
+
         if (!$this->isValidMediaType($mediaType)) {
             return null;
         }
 
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'SELECT rating, is_watched, rated_at, watched_at, title, poster_path
-             FROM user_ratings_history
-             WHERE user_id = :user_id AND tmdb_id = :tmdb_id AND media_type = :media_type
-             LIMIT 1'
-        );
-        $stmt->execute([
-            'user_id'    => $userId,
-            'tmdb_id'    => $tmdbId,
-            'media_type' => $mediaType,
-        ]);
+        $row = $this->store->read()['ratings'][JsonStore::mediaKey($tmdbId, $mediaType)] ?? null;
 
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if (!$row) {
+        if (!is_array($row)) {
             return null;
         }
 
         return [
             'rating'      => $row['rating'] !== null ? (int) $row['rating'] : null,
-            'is_watched'  => (bool) $row['is_watched'],
-            'rated_at'    => $row['rated_at'],
-            'watched_at'  => $row['watched_at'],
-            'title'       => $row['title'],
-            'poster_path' => $row['poster_path'],
+            'is_watched'  => (bool) ($row['is_watched'] ?? false),
+            'rated_at'    => $row['rated_at'] ?? null,
+            'watched_at'  => $row['watched_at'] ?? null,
+            'title'       => $row['title'] ?? null,
+            'poster_path' => $row['poster_path'] ?? null,
         ];
     }
 
@@ -312,21 +296,48 @@ final class UserRatingsHistoryService
      */
     public function getHistoryForUser(int $userId, ?int $limit = null): array
     {
-        $sql = 'SELECT tmdb_id, media_type, rating, is_watched, title, poster_path,
-                       rated_at, watched_at, created_at, updated_at
-                FROM user_ratings_history
-                WHERE user_id = :user_id
-                ORDER BY updated_at DESC';
+        unset($userId);
+
+        $rows = array_values($this->store->read()['ratings']);
+
+        usort($rows, static fn(array $a, array $b): int =>
+            strcmp((string) ($b['updated_at'] ?? ''), (string) ($a['updated_at'] ?? '')));
 
         if ($limit !== null && $limit > 0) {
-            $sql .= ' LIMIT ' . (int) $limit;
+            $rows = array_slice($rows, 0, $limit);
         }
 
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute(['user_id' => $userId]);
+        return $rows;
+    }
 
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    /**
+     * @param 'movie'|'tv' $mediaType
+     */
+    private function persistWatchedFlag(
+        int $tmdbId,
+        string $mediaType,
+        bool $watched,
+        ?string $title,
+        ?string $posterPath
+    ): void {
+        $this->store->mutate(function (array &$data) use ($tmdbId, $mediaType, $watched, $title, $posterPath): void {
+            $key     = JsonStore::mediaKey($tmdbId, $mediaType);
+            $current = $data['ratings'][$key] ?? [];
+            $now     = JsonStore::now();
+
+            $data['ratings'][$key] = [
+                'tmdb_id'     => $tmdbId,
+                'media_type'  => $mediaType,
+                'rating'      => $current['rating'] ?? null,
+                'is_watched'  => $watched,
+                'rated_at'    => $current['rated_at'] ?? null,
+                'watched_at'  => $watched ? $now : null,
+                'title'       => $title ?? ($current['title'] ?? null),
+                'poster_path' => $posterPath ?? ($current['poster_path'] ?? null),
+                'created_at'  => $current['created_at'] ?? $now,
+                'updated_at'  => $now,
+            ];
+        });
     }
 
     /**
@@ -335,45 +346,5 @@ final class UserRatingsHistoryService
     private function isValidMediaType(string $mediaType): bool
     {
         return in_array($mediaType, ['movie', 'tv'], true);
-    }
-
-    /**
-     * Mirror rating into local_ratings for community averages.
-     *
-     * @param 'movie'|'tv' $mediaType
-     */
-    private function syncLocalRating(int $userId, int $tmdbId, string $mediaType, int $rating): void
-    {
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'INSERT INTO local_ratings (user_id, tmdb_id, media_type, rating_value, created_at, updated_at)
-             VALUES (:user_id, :tmdb_id, :media_type, :rating_value, NOW(), NOW())
-             ON DUPLICATE KEY UPDATE
-                rating_value = VALUES(rating_value),
-                updated_at   = NOW()'
-        );
-        $stmt->execute([
-            'user_id'      => $userId,
-            'tmdb_id'      => $tmdbId,
-            'media_type'   => $mediaType,
-            'rating_value' => $rating,
-        ]);
-    }
-
-    /**
-     * @param 'movie'|'tv' $mediaType
-     */
-    private function removeLocalRating(int $userId, int $tmdbId, string $mediaType): void
-    {
-        $pdo  = Database::getConnection();
-        $stmt = $pdo->prepare(
-            'DELETE FROM local_ratings
-             WHERE user_id = :user_id AND tmdb_id = :tmdb_id AND media_type = :media_type'
-        );
-        $stmt->execute([
-            'user_id'    => $userId,
-            'tmdb_id'    => $tmdbId,
-            'media_type' => $mediaType,
-        ]);
     }
 }

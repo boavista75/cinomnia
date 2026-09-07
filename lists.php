@@ -73,8 +73,9 @@ $selectedList   = null;
 
 usort($lists, static function (array $a, array $b): int {
     $systemOrder = [
-        CustomListService::WATCHED_LIST_NAME => 0,
-        CustomListService::RATED_LIST_NAME     => 1,
+        CustomListService::WANT_TO_WATCH_LIST_NAME => 0,
+        CustomListService::WATCHED_LIST_NAME       => 1,
+        CustomListService::RATED_LIST_NAME         => 2,
     ];
 
     $aRank = $systemOrder[$a['name']] ?? 99;
@@ -117,24 +118,26 @@ function formatListDate(array $list): string
 function formatListDisplayName(string $name): string
 {
     return match ($name) {
-        CustomListService::WATCHED_LIST_NAME => 'Watched',
-        CustomListService::RATED_LIST_NAME     => 'You Have Rated',
-        default                                => $name,
+        CustomListService::WANT_TO_WATCH_LIST_NAME => 'Want to Watch',
+        CustomListService::WATCHED_LIST_NAME       => 'Watched',
+        CustomListService::RATED_LIST_NAME         => 'You Have Rated',
+        default                                    => $name,
     };
 }
 
 function getSystemListSyncNote(string $name): ?string
 {
     return match ($name) {
-        CustomListService::WATCHED_LIST_NAME => 'Synced from watched status',
-        CustomListService::RATED_LIST_NAME     => 'Synced from your ratings',
-        default                                => null,
+        CustomListService::WANT_TO_WATCH_LIST_NAME => 'Synced from the Want to Watch button',
+        CustomListService::WATCHED_LIST_NAME       => 'Synced from watched status',
+        CustomListService::RATED_LIST_NAME         => 'Synced from your ratings',
+        default                                    => null,
     };
 }
 
 function isSystemListName(string $name): bool
 {
-    return in_array($name, [CustomListService::WATCHED_LIST_NAME, CustomListService::RATED_LIST_NAME], true);
+    return CustomListService::isSystemListName($name);
 }
 
 $pageTitle = 'My Lists';
@@ -316,9 +319,13 @@ require __DIR__ . '/includes/header.php';
                         <?php if ($isSystemDetail && $detailSyncNote !== null): ?>
                             <p class="list-detail__note">
                                 <?= Security::escape($detailSyncNote) ?>.
-                                Removing a title here also clears its
-                                <?= $selectedList['name'] === CustomListService::WATCHED_LIST_NAME ? 'watched status' : 'rating' ?>
-                                on the details page.
+                                <?php if ($selectedList['name'] === CustomListService::WATCHED_LIST_NAME): ?>
+                                    Removing a title here also clears its watched status on the details page.
+                                <?php elseif ($selectedList['name'] === CustomListService::RATED_LIST_NAME): ?>
+                                    Removing a title here also clears its rating on the details page.
+                                <?php else: ?>
+                                    Marking a title as watched automatically removes it from this list.
+                                <?php endif; ?>
                             </p>
                         <?php endif; ?>
                     </div>
@@ -349,7 +356,13 @@ require __DIR__ . '/includes/header.php';
                     <div class="alert alert--error" role="alert">List not found.</div>
                 <?php elseif (empty($selectedItems)): ?>
                     <div class="list-detail__empty">
-                        <p>This list is empty. Browse titles and use <strong>Add to List</strong> on a detail page.</p>
+                        <p>
+                            <?php if ($selectedList['name'] === CustomListService::WANT_TO_WATCH_LIST_NAME): ?>
+                                This list is empty. Open a title and tap <strong>Want to Watch</strong>.
+                            <?php else: ?>
+                                This list is empty. Browse titles and use <strong>Add to List</strong> on a detail page.
+                            <?php endif; ?>
+                        </p>
                         <a href="<?= Security::escape(BASE_URL) ?>/index.php" class="btn btn--primary">Browse Titles</a>
                     </div>
                 <?php else: ?>
