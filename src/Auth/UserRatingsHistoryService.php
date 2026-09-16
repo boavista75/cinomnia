@@ -63,7 +63,7 @@ final class UserRatingsHistoryService
             ];
         });
 
-        $this->customLists->syncRatedListAdd($userId, $tmdbId, $mediaType, $title, $posterPath);
+        unset($userId);
 
         return [
             'success' => true,
@@ -101,7 +101,7 @@ final class UserRatingsHistoryService
             return ['success' => false, 'message' => 'No rating found for this title.'];
         }
 
-        $this->customLists->syncRatedListRemove($userId, $tmdbId, $mediaType);
+        unset($userId);
 
         return ['success' => true, 'message' => 'Rating cleared.'];
     }
@@ -156,16 +156,17 @@ final class UserRatingsHistoryService
         if ($watched) {
             $this->customLists->syncWatchedListAdd($userId, $tmdbId, $mediaType, $title, $posterPath);
             $this->customLists->syncWantToWatchListRemove($userId, $tmdbId, $mediaType);
+            $this->customLists->syncCurrentlyWatchingListRemove($userId, $tmdbId, $mediaType);
         } else {
             $this->customLists->syncWatchedListRemove($userId, $tmdbId, $mediaType);
         }
 
-        return [
-            'success'           => true,
-            'message'           => $watched ? 'Marked as watched.' : 'Marked as not watched.',
-            'is_watched'        => $watched,
-            'in_want_to_watch'  => $this->customLists->isItemInWantToWatchList($userId, $tmdbId, $mediaType),
-        ];
+        return $this->libraryActionPayload(
+            $userId,
+            $tmdbId,
+            $mediaType,
+            $watched ? 'Marked as watched.' : 'Marked as not watched.'
+        );
     }
 
     /**
@@ -189,14 +190,8 @@ final class UserRatingsHistoryService
 
         if ($this->customLists->isItemInWantToWatchList($userId, $tmdbId, $mediaType)) {
             $this->customLists->syncWantToWatchListRemove($userId, $tmdbId, $mediaType);
-            $interaction = $this->getInteraction($userId, $tmdbId, $mediaType);
 
-            return [
-                'success'          => true,
-                'message'          => 'Removed from Want to Watch.',
-                'in_want_to_watch' => false,
-                'is_watched'       => (bool) ($interaction['is_watched'] ?? false),
-            ];
+            return $this->libraryActionPayload($userId, $tmdbId, $mediaType, 'Removed from Want to Watch.');
         }
 
         $interaction = $this->getInteraction($userId, $tmdbId, $mediaType);
@@ -206,16 +201,58 @@ final class UserRatingsHistoryService
             $this->setWatched($userId, $tmdbId, $mediaType, false, $title, $posterPath);
         }
 
+        $this->customLists->syncCurrentlyWatchingListRemove($userId, $tmdbId, $mediaType);
         $this->customLists->syncWantToWatchListAdd($userId, $tmdbId, $mediaType, $title, $posterPath);
 
-        return [
-            'success'          => true,
-            'message'          => $wasWatched
-                ? 'Moved from Watched to Want to Watch.'
-                : 'Added to Want to Watch.',
-            'in_want_to_watch' => true,
-            'is_watched'       => false,
-        ];
+        return $this->libraryActionPayload(
+            $userId,
+            $tmdbId,
+            $mediaType,
+            $wasWatched ? 'Moved from Watched to Want to Watch.' : 'Added to Want to Watch.'
+        );
+    }
+
+    /**
+     * @param 'movie'|'tv' $mediaType
+     * @return array{success: bool, message: string, in_currently_watching?: bool, in_want_to_watch?: bool, is_watched?: bool}
+     */
+    public function toggleCurrentlyWatching(
+        int $userId,
+        int $tmdbId,
+        string $mediaType,
+        ?string $title = null,
+        ?string $posterPath = null
+    ): array {
+        if ($mediaType !== 'tv') {
+            return ['success' => false, 'message' => 'Currently Watching is only available for TV shows.'];
+        }
+
+        if ($tmdbId <= 0) {
+            return ['success' => false, 'message' => 'Invalid TMDB ID.'];
+        }
+
+        if ($this->customLists->isItemInCurrentlyWatchingList($userId, $tmdbId, $mediaType)) {
+            $this->customLists->syncCurrentlyWatchingListRemove($userId, $tmdbId, $mediaType);
+
+            return $this->libraryActionPayload($userId, $tmdbId, $mediaType, 'Removed from Currently Watching.');
+        }
+
+        $interaction = $this->getInteraction($userId, $tmdbId, $mediaType);
+        $wasWatched  = (bool) ($interaction['is_watched'] ?? false);
+
+        if ($wasWatched) {
+            $this->setWatched($userId, $tmdbId, $mediaType, false, $title, $posterPath);
+        }
+
+        $this->customLists->syncWantToWatchListRemove($userId, $tmdbId, $mediaType);
+        $this->customLists->syncCurrentlyWatchingListAdd($userId, $tmdbId, $mediaType, $title, $posterPath);
+
+        return $this->libraryActionPayload(
+            $userId,
+            $tmdbId,
+            $mediaType,
+            $wasWatched ? 'Moved from Watched to Currently Watching.' : 'Added to Currently Watching.'
+        );
     }
 
     /**
@@ -230,30 +267,6 @@ final class UserRatingsHistoryService
         }
 
         $this->persistWatchedFlag($tmdbId, $mediaType, false, null, null);
-    }
-
-    /**
-     * @param 'movie'|'tv' $mediaType
-     */
-    public function clearRatingStatus(int $userId, int $tmdbId, string $mediaType): void
-    {
-        unset($userId);
-
-        if (!$this->isValidMediaType($mediaType) || $tmdbId <= 0) {
-            return;
-        }
-
-        $this->store->mutate(function (array &$data) use ($tmdbId, $mediaType): void {
-            $key = JsonStore::mediaKey($tmdbId, $mediaType);
-
-            if (!isset($data['ratings'][$key])) {
-                return;
-            }
-
-            $data['ratings'][$key]['rating']     = null;
-            $data['ratings'][$key]['rated_at']   = null;
-            $data['ratings'][$key]['updated_at'] = JsonStore::now();
-        });
     }
 
     /**
@@ -289,6 +302,63 @@ final class UserRatingsHistoryService
             'title'       => $row['title'] ?? null,
             'poster_path' => $row['poster_path'] ?? null,
         ];
+    }
+
+    /**
+     * Library flags for every title the owner has rated, watched, or saved.
+     *
+     * @return array<string, array{rating: ?int, is_watched: bool, want_to_watch: bool, currently_watching: bool}>
+     */
+    public function getLibraryIndex(int $userId): array
+    {
+        $index = [];
+
+        foreach ($this->store->read()['ratings'] as $key => $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $index[(string) $key] = [
+                'rating'              => $row['rating'] !== null ? (int) $row['rating'] : null,
+                'is_watched'          => (bool) ($row['is_watched'] ?? false),
+                'want_to_watch'       => false,
+                'currently_watching'  => false,
+            ];
+        }
+
+        foreach ($this->customLists->getWantToWatchKeys($userId) as $key => $present) {
+            unset($present);
+
+            if (!isset($index[$key])) {
+                $index[$key] = [
+                    'rating'             => null,
+                    'is_watched'         => false,
+                    'want_to_watch'      => true,
+                    'currently_watching' => false,
+                ];
+                continue;
+            }
+
+            $index[$key]['want_to_watch'] = true;
+        }
+
+        foreach ($this->customLists->getCurrentlyWatchingKeys($userId) as $key => $present) {
+            unset($present);
+
+            if (!isset($index[$key])) {
+                $index[$key] = [
+                    'rating'             => null,
+                    'is_watched'         => false,
+                    'want_to_watch'      => false,
+                    'currently_watching' => true,
+                ];
+                continue;
+            }
+
+            $index[$key]['currently_watching'] = true;
+        }
+
+        return $index;
     }
 
     /**
@@ -346,5 +416,22 @@ final class UserRatingsHistoryService
     private function isValidMediaType(string $mediaType): bool
     {
         return in_array($mediaType, ['movie', 'tv'], true);
+    }
+
+    /**
+     * @param 'movie'|'tv' $mediaType
+     * @return array{success: bool, message: string, is_watched: bool, in_want_to_watch: bool, in_currently_watching: bool}
+     */
+    private function libraryActionPayload(int $userId, int $tmdbId, string $mediaType, string $message): array
+    {
+        $interaction = $this->getInteraction($userId, $tmdbId, $mediaType);
+
+        return [
+            'success'                => true,
+            'message'                => $message,
+            'is_watched'             => (bool) ($interaction['is_watched'] ?? false),
+            'in_want_to_watch'       => $this->customLists->isItemInWantToWatchList($userId, $tmdbId, $mediaType),
+            'in_currently_watching'  => $this->customLists->isItemInCurrentlyWatchingList($userId, $tmdbId, $mediaType),
+        ];
     }
 }

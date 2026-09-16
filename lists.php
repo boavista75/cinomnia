@@ -7,13 +7,7 @@ require_once __DIR__ . '/includes/bootstrap.php';
 use Cinomnia\Auth\CustomListService;
 use Cinomnia\Security\Security;
 
-if (!$auth->isLoggedIn()) {
-    redirect('/login.php?redirect=' . urlencode('/lists.php') . '&message=' . urlencode(
-        'Please log in to manage your custom lists.'
-    ));
-}
-
-$userId  = (int) $auth->getUserId();
+$userId  = OWNER_USER_ID;
 $message = '';
 $error   = '';
 
@@ -57,6 +51,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $message = $result['success'] ? $result['message'] : '';
                 $error   = $result['success'] ? '' : $result['message'];
                 break;
+
+            case 'mark_watched':
+                $itemType = postParam('media_type', 'movie');
+                $itemType = in_array($itemType, ['movie', 'tv'], true) ? $itemType : 'movie';
+                $result   = $userMedia->setWatched(
+                    $userId,
+                    (int) postParam('tmdb_id', '0'),
+                    $itemType,
+                    true,
+                    postParam('title') !== '' ? postParam('title') : null,
+                    postParam('poster_path') !== '' ? postParam('poster_path') : null
+                );
+                $message = $result['success'] ? $result['message'] : '';
+                $error   = $result['success'] ? '' : $result['message'];
+                break;
         }
     }
 }
@@ -67,15 +76,16 @@ if ($message === '' && getParam('message') !== '') {
 
 $lists         = $customLists->getListsForUser($userId);
 $listPreviews  = $customLists->getPreviewItemsByList($userId, 5);
+$libraryIndex  = $userMedia->getLibraryIndex($userId);
 $selectedListId = (int) getParam('list_id', '0');
 $selectedItems  = null;
 $selectedList   = null;
 
 usort($lists, static function (array $a, array $b): int {
     $systemOrder = [
-        CustomListService::WANT_TO_WATCH_LIST_NAME => 0,
-        CustomListService::WATCHED_LIST_NAME       => 1,
-        CustomListService::RATED_LIST_NAME         => 2,
+        CustomListService::WANT_TO_WATCH_LIST_NAME      => 0,
+        CustomListService::CURRENTLY_WATCHING_LIST_NAME => 1,
+        CustomListService::WATCHED_LIST_NAME            => 2,
     ];
 
     $aRank = $systemOrder[$a['name']] ?? 99;
@@ -90,6 +100,10 @@ usort($lists, static function (array $a, array $b): int {
 
 if ($selectedListId > 0) {
     $selectedItems = $customLists->getListItems($userId, $selectedListId);
+
+    if (is_array($selectedItems) && $selectedItems !== []) {
+        $selectedItems = $tmdb->attachAppleTvAvailability($selectedItems);
+    }
 
     foreach ($lists as $list) {
         if ((int) $list['id'] === $selectedListId) {
@@ -118,20 +132,20 @@ function formatListDate(array $list): string
 function formatListDisplayName(string $name): string
 {
     return match ($name) {
-        CustomListService::WANT_TO_WATCH_LIST_NAME => 'Want to Watch',
-        CustomListService::WATCHED_LIST_NAME       => 'Watched',
-        CustomListService::RATED_LIST_NAME         => 'You Have Rated',
-        default                                    => $name,
+        CustomListService::WANT_TO_WATCH_LIST_NAME      => 'Want to Watch',
+        CustomListService::CURRENTLY_WATCHING_LIST_NAME => 'Currently Watching',
+        CustomListService::WATCHED_LIST_NAME            => 'Watched',
+        default                                         => $name,
     };
 }
 
 function getSystemListSyncNote(string $name): ?string
 {
     return match ($name) {
-        CustomListService::WANT_TO_WATCH_LIST_NAME => 'Synced from the Want to Watch button',
-        CustomListService::WATCHED_LIST_NAME       => 'Synced from watched status',
-        CustomListService::RATED_LIST_NAME         => 'Synced from your ratings',
-        default                                    => null,
+        CustomListService::WANT_TO_WATCH_LIST_NAME      => 'Synced from the Want to Watch button',
+        CustomListService::CURRENTLY_WATCHING_LIST_NAME => 'Synced from the Currently Watching button',
+        CustomListService::WATCHED_LIST_NAME            => 'Synced from watched status',
+        default                                         => null,
     };
 }
 
@@ -148,7 +162,7 @@ require __DIR__ . '/includes/header.php';
 <main class="lists-dashboard">
     <div class="lists-dashboard__inner">
 
-        <!-- Hero header -->
+        <!-- Centered hero with the create-list capsule as the focal point -->
         <header class="lists-dashboard__hero">
             <div class="lists-dashboard__hero-copy">
                 <p class="lists-dashboard__eyebrow">Your collections</p>
@@ -194,7 +208,7 @@ require __DIR__ . '/includes/header.php';
                 </p>
             </section>
         <?php else: ?>
-            <!-- List cards grid -->
+            <!-- List tiles -->
             <section class="lists-dashboard__cards" aria-label="Your lists">
                 <?php foreach ($lists as $list): ?>
                     <?php
@@ -210,22 +224,6 @@ require __DIR__ . '/includes/header.php';
                     $remaining      = max(0, $itemCount - count($previews));
                     ?>
                     <article class="list-card<?= $isSelected ? ' list-card--active' : '' ?><?= $isSystemList ? ' list-card--system' : '' ?>">
-                        <div class="list-card__top">
-                            <div class="list-card__heading<?= $isSystemList ? ' list-card__heading--system' : '' ?>">
-                                <?php if ($isSystemList): ?>
-                                    <span class="list-card__badge list-card__badge--synced">Auto-synced</span>
-                                <?php else: ?>
-                                    <span class="list-card__badge">Custom playlist</span>
-                                <?php endif; ?>
-                                <h2 class="list-card__title"><?= Security::escape($displayName) ?></h2>
-                                <p class="list-card__meta">
-                                    <span><?= Security::escape($countLabel) ?></span>
-                                    <span class="list-card__meta-dot" aria-hidden="true">&middot;</span>
-                                    <span>Created <?= Security::escape(formatListDate($list)) ?></span>
-                                </p>
-                            </div>
-                        </div>
-
                         <div class="list-card__previews<?= $isSystemList ? ' list-card__previews--system' : '' ?>"
                              aria-label="Preview of titles in this list">
                             <?php if ($itemCount === 0): ?>
@@ -258,6 +256,22 @@ require __DIR__ . '/includes/header.php';
                                     <?php endif; ?>
                                 </div>
                             <?php endif; ?>
+                        </div>
+
+                        <div class="list-card__top">
+                            <div class="list-card__heading<?= $isSystemList ? ' list-card__heading--system' : '' ?>">
+                                <?php if ($isSystemList): ?>
+                                    <span class="list-card__badge list-card__badge--synced">Auto-synced</span>
+                                <?php else: ?>
+                                    <span class="list-card__badge">Custom playlist</span>
+                                <?php endif; ?>
+                                <h2 class="list-card__title"><?= Security::escape($displayName) ?></h2>
+                                <p class="list-card__meta">
+                                    <span><?= Security::escape($countLabel) ?></span>
+                                    <span class="list-card__meta-dot" aria-hidden="true">&middot;</span>
+                                    <span>Created <?= Security::escape(formatListDate($list)) ?></span>
+                                </p>
+                            </div>
                         </div>
 
                         <div class="list-card__actions<?= $isSystemList ? ' list-card__actions--system' : '' ?>">
@@ -299,11 +313,13 @@ require __DIR__ . '/includes/header.php';
             </section>
         <?php endif; ?>
 
-        <!-- Detail panel for selected list -->
+        <!-- Detail sheet for the selected list -->
         <?php if ($selectedList !== null): ?>
             <?php
             $isSystemDetail  = isSystemListName($selectedList['name']);
             $detailSyncNote  = getSystemListSyncNote($selectedList['name']);
+            $isWantToWatchList = $selectedList['name'] === CustomListService::WANT_TO_WATCH_LIST_NAME;
+            $isCurrentlyWatchingList = $selectedList['name'] === CustomListService::CURRENTLY_WATCHING_LIST_NAME;
             ?>
             <section class="list-detail" id="list-detail" aria-labelledby="list-detail-title">
                 <div class="list-detail__header">
@@ -321,8 +337,8 @@ require __DIR__ . '/includes/header.php';
                                 <?= Security::escape($detailSyncNote) ?>.
                                 <?php if ($selectedList['name'] === CustomListService::WATCHED_LIST_NAME): ?>
                                     Removing a title here also clears its watched status on the details page.
-                                <?php elseif ($selectedList['name'] === CustomListService::RATED_LIST_NAME): ?>
-                                    Removing a title here also clears its rating on the details page.
+                                <?php elseif ($selectedList['name'] === CustomListService::CURRENTLY_WATCHING_LIST_NAME): ?>
+                                    TV shows you are in the middle of. Marking a title as watched removes it from this list.
                                 <?php else: ?>
                                     Marking a title as watched automatically removes it from this list.
                                 <?php endif; ?>
@@ -359,6 +375,8 @@ require __DIR__ . '/includes/header.php';
                         <p>
                             <?php if ($selectedList['name'] === CustomListService::WANT_TO_WATCH_LIST_NAME): ?>
                                 This list is empty. Open a title and tap <strong>Want to Watch</strong>.
+                            <?php elseif ($selectedList['name'] === CustomListService::CURRENTLY_WATCHING_LIST_NAME): ?>
+                                This list is empty. Open a TV show and tap <strong>Currently Watching</strong>.
                             <?php else: ?>
                                 This list is empty. Browse titles and use <strong>Add to List</strong> on a detail page.
                             <?php endif; ?>
@@ -374,6 +392,7 @@ require __DIR__ . '/includes/header.php';
                             $itemTitle  = $item['title'] ?? 'Untitled';
                             $itemPoster = $tmdb->posterUrl($item['poster_path'] ?? null, TMDB_POSTER_GRID);
                             $detailUrl  = BASE_URL . '/details.php?type=' . urlencode($itemType) . '&id=' . $itemTmdbId;
+                            $itemFlags  = libraryFlags($libraryIndex, $itemTmdbId, $itemType);
                             ?>
                             <li class="list-detail__item">
                                 <a href="<?= Security::escape($detailUrl) ?>" class="list-detail__item-link">
@@ -387,17 +406,35 @@ require __DIR__ . '/includes/header.php';
                                         <span class="list-detail__type list-detail__type--<?= Security::escape($itemType) ?>">
                                             <?= Security::escape($itemType === 'tv' ? 'TV' : 'Movie') ?>
                                         </span>
+                                        <?php renderLibraryOverlay($itemFlags); ?>
+                                        <?php if (!empty($item['on_apple_tv'])): ?>
+                                            <?php renderAppleTvBadge(); ?>
+                                        <?php endif; ?>
                                     </div>
                                     <h3 class="list-detail__item-title"><?= Security::escape($itemTitle) ?></h3>
                                 </a>
-                                <form method="POST" action="" class="list-detail__remove-form">
-                                    <?= Security::csrfField() ?>
-                                    <input type="hidden" name="action" value="remove_from_list">
-                                    <input type="hidden" name="list_id" value="<?= (int) $selectedList['id'] ?>">
-                                    <input type="hidden" name="tmdb_id" value="<?= $itemTmdbId ?>">
-                                    <input type="hidden" name="media_type" value="<?= Security::escape($itemType) ?>">
-                                    <button type="submit" class="btn btn--ghost btn--sm">Remove</button>
-                                </form>
+                                <div class="list-detail__item-actions">
+                                    <?php if ($isWantToWatchList || $isCurrentlyWatchingList): ?>
+                                        <form method="POST" action="" class="list-detail__watched-form">
+                                            <?= Security::csrfField() ?>
+                                            <input type="hidden" name="action" value="mark_watched">
+                                            <input type="hidden" name="list_id" value="<?= (int) $selectedList['id'] ?>">
+                                            <input type="hidden" name="tmdb_id" value="<?= $itemTmdbId ?>">
+                                            <input type="hidden" name="media_type" value="<?= Security::escape($itemType) ?>">
+                                            <input type="hidden" name="title" value="<?= Security::escape($itemTitle) ?>">
+                                            <input type="hidden" name="poster_path" value="<?= Security::escape((string) ($item['poster_path'] ?? '')) ?>">
+                                            <button type="submit" class="btn btn--primary btn--sm">Watched</button>
+                                        </form>
+                                    <?php endif; ?>
+                                    <form method="POST" action="" class="list-detail__remove-form">
+                                        <?= Security::csrfField() ?>
+                                        <input type="hidden" name="action" value="remove_from_list">
+                                        <input type="hidden" name="list_id" value="<?= (int) $selectedList['id'] ?>">
+                                        <input type="hidden" name="tmdb_id" value="<?= $itemTmdbId ?>">
+                                        <input type="hidden" name="media_type" value="<?= Security::escape($itemType) ?>">
+                                        <button type="submit" class="btn btn--ghost btn--sm">Remove</button>
+                                    </form>
+                                </div>
                             </li>
                         <?php endforeach; ?>
                     </ul>
@@ -435,6 +472,6 @@ require __DIR__ . '/includes/header.php';
     </div>
 </div>
 
-<script src="<?= Security::escape(BASE_URL) ?>/js/lists.js"></script>
+<script src="<?= Security::escape(BASE_URL) ?>/js/lists.js?v=<?= (int) filemtime(APP_ROOT . '/js/lists.js') ?>"></script>
 
 <?php require __DIR__ . '/includes/footer.php'; ?>

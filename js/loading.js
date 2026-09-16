@@ -86,7 +86,6 @@
             var path = new URL(href, window.location.href).pathname;
             if (path.indexOf('details.php') !== -1) return 'Opening title… this may take a moment.';
             if (path.indexOf('lists.php') !== -1) return 'Loading your lists…';
-            if (path.indexOf('login.php') !== -1) return 'Please wait…';
             return 'Loading… this may take a moment.';
         } catch (err) {
             return defaultText;

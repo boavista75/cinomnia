@@ -22,6 +22,9 @@ final class TMDB_Service
     /** TMDB list endpoints always paginate in batches of 20. */
     private const TMDB_PAGE_SIZE = 20;
 
+    /** JustWatch / TMDB id for Apple TV+ (subscription), not the iTunes store. */
+    public const APPLE_TV_PLUS_PROVIDER_ID = 350;
+
     private string $apiKey;
     private string $baseUrl;
     private int $timeout;
@@ -243,26 +246,50 @@ final class TMDB_Service
     /**
      * Search movies and TV shows by query string.
      *
+     * Exact TMDB matches come first. If the query looks like a misspelled
+     * title (e.g. "The Hounting of Hill House"), fallback queries and fuzzy
+     * ranking recover the intended movie or show.
+     *
      * @return array<int, array<string, mixed>>
      */
     public function search(string $query, int $page = 1): array
     {
-        if (trim($query) === '') {
+        $query = trim(preg_replace('/\s+/', ' ', $query) ?? $query);
+        if ($query === '') {
             return [];
         }
 
-        $response = $this->request('/search/multi', [
-            'query'          => $query,
-            'page'           => $page,
-            'include_adult'  => 'false',
-        ]);
+        $direct = $this->searchExact($query, $page);
 
-        // Filter to movies and TV only (exclude people, etc.)
-        $results = $response['results'] ?? [];
+        // Later pages keep TMDB pagination for the original query.
+        if ($page > 1) {
+            return $direct;
+        }
+
+        $best = $this->bestTitleScore($query, $direct);
+        $needsFallback = $direct === []
+            || ($best < 0.78 && TitleMatcher::looksLikeFullTitle($query));
+
+        if (!$needsFallback) {
+            return $this->rankSearchResults($query, $direct);
+        }
+
+        $extra  = $this->searchExactMany(TitleMatcher::fallbackQueries($query));
+        $merged = $this->uniqueSearchItems(array_merge($direct, $extra));
+        $ranked = $this->rankSearchResults($query, $merged);
+
+        if ($direct !== []) {
+            return $ranked;
+        }
+
+        // Fallback hits must still look like the typed title, or we would
+        // dump unrelated movies that merely share one surviving word.
+        $bestScore = $this->bestTitleScore($query, $ranked);
+        $minScore  = max(0.62, $bestScore - 0.18);
 
         return array_values(array_filter(
-            $results,
-            static fn(array $item): bool => in_array($item['media_type'] ?? '', ['movie', 'tv'], true)
+            $ranked,
+            fn(array $item): bool => TitleMatcher::score($query, $this->searchableTitles($item)) >= $minScore
         ));
     }
 
@@ -275,7 +302,7 @@ final class TMDB_Service
     {
         try {
             return $this->request("/movie/{$id}", [
-                'append_to_response' => 'credits,videos',
+                'append_to_response' => 'credits,videos,watch/providers',
             ]);
         } catch (RuntimeException) {
             return null;
@@ -291,7 +318,7 @@ final class TMDB_Service
     {
         try {
             return $this->request("/tv/{$id}", [
-                'append_to_response' => 'credits,videos',
+                'append_to_response' => 'credits,videos,watch/providers',
             ]);
         } catch (RuntimeException) {
             return null;
@@ -480,6 +507,60 @@ final class TMDB_Service
     }
 
     /**
+     * Whether a title can be streamed on Apple TV+ in any region.
+     *
+     * Accepts either the raw TMDB `watch/providers` payload or its `results` map.
+     *
+     * @param array<string, mixed> $watchProviders
+     */
+    public function isAvailableOnAppleTv(array $watchProviders): bool
+    {
+        $results = $watchProviders['results'] ?? $watchProviders;
+        if (!is_array($results)) {
+            return false;
+        }
+
+        foreach ($results as $region) {
+            if (!is_array($region)) {
+                continue;
+            }
+
+            foreach (['flatrate', 'ads', 'free'] as $offerType) {
+                $offers = $region[$offerType] ?? [];
+                if (!is_array($offers)) {
+                    continue;
+                }
+
+                foreach ($offers as $provider) {
+                    if (!is_array($provider)) {
+                        continue;
+                    }
+
+                    if ($this->isAppleTvPlusProvider($provider)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param array<string, mixed> $provider
+     */
+    private function isAppleTvPlusProvider(array $provider): bool
+    {
+        if ((int) ($provider['provider_id'] ?? 0) === self::APPLE_TV_PLUS_PROVIDER_ID) {
+            return true;
+        }
+
+        $name = strtolower(trim((string) ($provider['provider_name'] ?? '')));
+
+        return $name === 'apple tv plus' || $name === 'apple tv+';
+    }
+
+    /**
      * Full release / first-air date (YYYY-MM-DD), formatted for display.
      */
     public function formatDate(array|string|null $value): string
@@ -583,17 +664,20 @@ final class TMDB_Service
         }
 
         // Build one detail-endpoint request per item, keyed by list position.
-        $endpoints = [];
+        $endpoints   = [];
+        $paramsByKey = [];
         foreach ($items as $index => $item) {
+            $items[$index]['on_apple_tv'] = false;
             $type = $this->getMediaType($item, $defaultType);
             $id   = (int) ($item['id'] ?? 0);
 
             if ($id > 0) {
-                $endpoints[$index] = "/{$type}/{$id}";
+                $endpoints[$index]   = "/{$type}/{$id}";
+                $paramsByKey[$index] = ['append_to_response' => 'watch/providers'];
             }
         }
 
-        $responses = $this->requestMultiple($endpoints);
+        $responses = $this->requestMultiple($endpoints, $paramsByKey);
 
         // Merge the freshly fetched fields back into the original items.
         foreach ($responses as $index => $detail) {
@@ -618,14 +702,242 @@ final class TMDB_Service
             // Ensure date fields are present for consistent display
             $items[$index]['release_date']   ??= $detail['release_date']   ?? null;
             $items[$index]['first_air_date'] ??= $detail['first_air_date'] ?? null;
+
+            $items[$index]['on_apple_tv'] = $this->isAvailableOnAppleTv(
+                $detail['watch/providers'] ?? []
+            );
+        }
+
+        return $items;
+    }
+
+    /**
+     * Attach Apple TV+ availability to stored list items (id or tmdb_id).
+     *
+     * @param array<int, array<string, mixed>> $items
+     * @param 'movie'|'tv' $defaultType
+     * @return array<int, array<string, mixed>>
+     */
+    public function attachAppleTvAvailability(array $items, string $defaultType = 'movie'): array
+    {
+        if ($items === []) {
+            return $items;
+        }
+
+        $endpoints = [];
+        foreach ($items as $index => $item) {
+            $items[$index]['on_apple_tv'] = false;
+            $type = $this->getMediaType($item, (string) ($item['media_type'] ?? $defaultType));
+            $id   = (int) ($item['id'] ?? $item['tmdb_id'] ?? 0);
+
+            if ($id > 0) {
+                $endpoints[$index] = "/{$type}/{$id}/watch/providers";
+            }
+        }
+
+        if ($endpoints === []) {
+            return $items;
+        }
+
+        $responses = $this->requestMultiple($endpoints);
+
+        foreach ($responses as $index => $payload) {
+            if (is_array($payload)) {
+                $items[$index]['on_apple_tv'] = $this->isAvailableOnAppleTv($payload);
+            }
         }
 
         return $items;
     }
 
     // -------------------------------------------------------------------------
+    // Search helpers (exact TMDB calls + fuzzy ranking)
+    // -------------------------------------------------------------------------
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function searchExact(string $query, int $page = 1): array
+    {
+        $response = $this->request('/search/multi', [
+            'query'         => $query,
+            'page'          => $page,
+            'include_adult' => 'false',
+        ]);
+
+        return $this->movieTvResults($response['results'] ?? []);
+    }
+
+    /**
+     * Run several TMDB searches in parallel and flatten movie/TV hits.
+     *
+     * @param list<string> $queries
+     * @return array<int, array<string, mixed>>
+     */
+    private function searchExactMany(array $queries): array
+    {
+        $queries = array_values(array_unique(array_filter(
+            $queries,
+            static fn(string $query): bool => trim($query) !== ''
+        )));
+
+        if ($queries === []) {
+            return [];
+        }
+
+        $endpoints   = [];
+        $paramsByKey = [];
+
+        foreach ($queries as $index => $query) {
+            $endpoints[$index]   = '/search/multi';
+            $paramsByKey[$index] = [
+                'query'         => $query,
+                'page'          => 1,
+                'include_adult' => 'false',
+            ];
+        }
+
+        $merged    = [];
+        $responses = $this->requestMultiple($endpoints, $paramsByKey);
+
+        foreach ($responses as $response) {
+            if (!is_array($response)) {
+                continue;
+            }
+
+            foreach ($this->movieTvResults($response['results'] ?? []) as $item) {
+                $merged[] = $item;
+            }
+        }
+
+        return $merged;
+    }
+
+    /**
+     * @param array<int, mixed> $results
+     * @return array<int, array<string, mixed>>
+     */
+    private function movieTvResults(array $results): array
+    {
+        $items = [];
+
+        foreach ($results as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            if (in_array($item['media_type'] ?? '', ['movie', 'tv'], true)) {
+                $items[] = $item;
+            }
+        }
+
+        return $items;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $items
+     * @return array<int, array<string, mixed>>
+     */
+    private function uniqueSearchItems(array $items): array
+    {
+        $seen   = [];
+        $unique = [];
+
+        foreach ($items as $item) {
+            $id  = (int) ($item['id'] ?? 0);
+            $key = ($item['media_type'] ?? '') . ':' . $id;
+
+            if ($id <= 0 || isset($seen[$key])) {
+                continue;
+            }
+
+            $seen[$key] = true;
+            $unique[]   = $item;
+        }
+
+        return $unique;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $items
+     */
+    private function bestTitleScore(string $query, array $items): float
+    {
+        $best = 0.0;
+
+        foreach ($items as $item) {
+            $best = max($best, TitleMatcher::score($query, $this->searchableTitles($item)));
+            if ($best >= 0.995) {
+                return 1.0;
+            }
+        }
+
+        return $best;
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $items
+     * @return array<int, array<string, mixed>>
+     */
+    private function rankSearchResults(string $query, array $items): array
+    {
+        if ($items === []) {
+            return [];
+        }
+
+        $scored = [];
+        foreach ($items as $item) {
+            $scored[] = [
+                TitleMatcher::score($query, $this->searchableTitles($item)),
+                (float) ($item['popularity'] ?? 0),
+                $item,
+            ];
+        }
+
+        usort($scored, static function (array $left, array $right): int {
+            $byScore = $right[0] <=> $left[0];
+            if ($byScore !== 0) {
+                return $byScore;
+            }
+
+            return $right[1] <=> $left[1];
+        });
+
+        return array_map(static fn(array $row): array => $row[2], $scored);
+    }
+
+    /**
+     * @param array<string, mixed> $item
+     * @return list<string>
+     */
+    private function searchableTitles(array $item): array
+    {
+        $titles = [];
+
+        foreach (['title', 'name', 'original_title', 'original_name'] as $field) {
+            $value = trim((string) ($item[$field] ?? ''));
+            if ($value !== '' && !in_array($value, $titles, true)) {
+                $titles[] = $value;
+            }
+        }
+
+        return $titles;
+    }
+
+    // -------------------------------------------------------------------------
     // Internal HTTP Layer (cURL)
     // -------------------------------------------------------------------------
+
+    /**
+     * @param array<string, scalar> $params
+     */
+    private function buildUrl(string $endpoint, array $params = []): string
+    {
+        $params['api_key']  = $this->apiKey;
+        $params['language'] = $params['language'] ?? 'en-US';
+
+        return $this->baseUrl . $endpoint . '?' . http_build_query($params);
+    }
 
     /**
      * Execute a GET request against the TMDB API.
@@ -636,10 +948,7 @@ final class TMDB_Service
      */
     private function request(string $endpoint, array $params = []): array
     {
-        $params['api_key']  = $this->apiKey;
-        $params['language'] = $params['language'] ?? 'en-US';
-
-        $url = $this->baseUrl . $endpoint . '?' . http_build_query($params);
+        $url = $this->buildUrl($endpoint, $params);
 
         $ch = \curl_init();
 
@@ -681,31 +990,29 @@ final class TMDB_Service
      * for that key rather than throwing, so one bad item cannot break the grid.
      *
      * @param array<int|string, string> $endpoints Map of key => endpoint path
+     * @param array<int|string, array<string, scalar>> $paramsByKey Extra query params per key
      * @return array<int|string, array<string, mixed>|null> Decoded responses, same keys
      */
-    private function requestMultiple(array $endpoints): array
+    private function requestMultiple(array $endpoints, array $paramsByKey = []): array
     {
         if ($endpoints === []) {
             return [];
         }
 
         if (!function_exists('curl_multi_init') || !function_exists('curl_multi_exec')) {
-            return $this->requestMultipleSequential($endpoints);
+            return $this->requestMultipleSequential($endpoints, $paramsByKey);
         }
 
         $multiHandle = \curl_multi_init();
         if ($multiHandle === false) {
-            return $this->requestMultipleSequential($endpoints);
+            return $this->requestMultipleSequential($endpoints, $paramsByKey);
         }
 
         $handles = [];
 
         // Register one easy handle per endpoint on the shared multi handle.
         foreach ($endpoints as $key => $endpoint) {
-            $url = $this->baseUrl . $endpoint . '?' . http_build_query([
-                'api_key'  => $this->apiKey,
-                'language' => 'en-US',
-            ]);
+            $url = $this->buildUrl($endpoint, $paramsByKey[$key] ?? []);
 
             $ch = \curl_init();
             \curl_setopt_array($ch, $this->curlOptions($url));
@@ -745,15 +1052,16 @@ final class TMDB_Service
      * Sequential fallback when curl_multi is unavailable.
      *
      * @param array<int|string, string> $endpoints
+     * @param array<int|string, array<string, scalar>> $paramsByKey
      * @return array<int|string, array<string, mixed>|null>
      */
-    private function requestMultipleSequential(array $endpoints): array
+    private function requestMultipleSequential(array $endpoints, array $paramsByKey = []): array
     {
         $results = [];
 
         foreach ($endpoints as $key => $endpoint) {
             try {
-                $results[$key] = $this->request($endpoint);
+                $results[$key] = $this->request($endpoint, $paramsByKey[$key] ?? []);
             } catch (RuntimeException) {
                 $results[$key] = null;
             }

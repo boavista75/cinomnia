@@ -149,12 +149,14 @@
         userRating: config.userRating || null,
         isWatched: !!config.isWatched,
         isWantToWatch: !!config.isWantToWatch,
+        isCurrentlyWatching: !!config.isCurrentlyWatching,
         lists: config.lists || [],
         listIdsWithItem: config.listIdsWithItem || []
     };
 
     var watchedBtn    = document.getElementById('watched-toggle-btn');
     var wantToWatchBtn = document.getElementById('want-to-watch-btn');
+    var currentlyWatchingBtn = document.getElementById('currently-watching-btn');
     var addToListBtn  = document.getElementById('add-to-list-btn');
     var scorePicker   = document.getElementById('score-picker');
     var ratingValue   = document.getElementById('user-rating-value');
@@ -172,15 +174,25 @@
 
     function showToast(el, message, isError) {
         if (!el) return;
+
         el.textContent = message;
-        el.hidden = false;
         el.classList.toggle('is-error', !!isError);
         el.classList.toggle('is-success', !isError);
+        el.removeAttribute('hidden');
+        el.setAttribute('aria-hidden', 'false');
 
         window.clearTimeout(el._toastTimer);
+        window.clearTimeout(el._toastHideTimer);
+        el.classList.remove('is-visible');
+        void el.offsetWidth;
+        el.classList.add('is-visible');
+
         el._toastTimer = window.setTimeout(function () {
-            el.hidden = true;
-        }, 3200);
+            el.classList.remove('is-visible');
+            el._toastHideTimer = window.setTimeout(function () {
+                el.setAttribute('aria-hidden', 'true');
+            }, 300);
+        }, 2400);
     }
 
     function apiRequest(action, extra) {
@@ -264,22 +276,98 @@
             scoreDisplay.className = 'detail-score__display detail-score__display--' + scoreTone(rating);
         }
         renderScorePicker(rating);
+        updatePosterOverlay();
+    }
+
+    function applyLibraryState(data) {
+        if (Object.prototype.hasOwnProperty.call(data, 'is_watched')) {
+            state.isWatched = !!data.is_watched;
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'in_want_to_watch')) {
+            state.isWantToWatch = !!data.in_want_to_watch;
+        }
+        if (Object.prototype.hasOwnProperty.call(data, 'in_currently_watching')) {
+            state.isCurrentlyWatching = !!data.in_currently_watching;
+        }
+
+        updateWatchedDisplay(state.isWatched);
+        updateWantToWatchDisplay(state.isWantToWatch);
+        updateCurrentlyWatchingDisplay(state.isCurrentlyWatching);
+        updatePosterOverlay();
     }
 
     function updateWatchedDisplay(isWatched) {
-        if (!watchedBtn) return;
-
-        watchedBtn.classList.toggle('is-active', isWatched);
-        watchedBtn.classList.toggle('is-watched', isWatched);
-        watchedBtn.setAttribute('aria-pressed', isWatched ? 'true' : 'false');
+        if (watchedBtn) {
+            watchedBtn.classList.toggle('is-active', isWatched);
+            watchedBtn.classList.toggle('is-watched', isWatched);
+            watchedBtn.setAttribute('aria-pressed', isWatched ? 'true' : 'false');
+        }
     }
 
     function updateWantToWatchDisplay(inWantToWatch) {
-        if (!wantToWatchBtn) return;
+        if (wantToWatchBtn) {
+            wantToWatchBtn.classList.toggle('is-active', inWantToWatch);
+            wantToWatchBtn.classList.toggle('is-want', inWantToWatch);
+            wantToWatchBtn.setAttribute('aria-pressed', inWantToWatch ? 'true' : 'false');
+        }
+    }
 
-        wantToWatchBtn.classList.toggle('is-active', inWantToWatch);
-        wantToWatchBtn.classList.toggle('is-want', inWantToWatch);
-        wantToWatchBtn.setAttribute('aria-pressed', inWantToWatch ? 'true' : 'false');
+    function updateCurrentlyWatchingDisplay(isWatching) {
+        if (!currentlyWatchingBtn) {
+            return;
+        }
+
+        currentlyWatchingBtn.classList.toggle('is-active', isWatching);
+        currentlyWatchingBtn.classList.toggle('is-watching', isWatching);
+        currentlyWatchingBtn.setAttribute('aria-pressed', isWatching ? 'true' : 'false');
+    }
+
+    function updatePosterOverlay() {
+        var wrap = document.querySelector('.detail-hero__poster-wrap');
+        if (!wrap) {
+            return;
+        }
+
+        var overlay = wrap.querySelector('.library-overlay');
+        var rating = state.userRating ? parseInt(state.userRating, 10) : null;
+        var watching = !!state.isCurrentlyWatching;
+        var watched = !!state.isWatched && !watching;
+        var want = !!state.isWantToWatch && !watched && !watching;
+
+        if (!rating && !watched && !want && !watching) {
+            if (overlay) {
+                overlay.remove();
+            }
+            return;
+        }
+
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.className = 'library-overlay';
+            wrap.appendChild(overlay);
+        }
+
+        var html = '';
+        if (watching || watched || want) {
+            var statusClass = watching ? 'watching' : (watched ? 'watched' : 'want');
+            var statusLabel = watching ? 'Currently' : (watched ? 'Watched' : 'Want');
+            html += '<span class="library-overlay__status library-overlay__status--'
+                + statusClass + '">' + statusLabel + '</span>';
+        } else {
+            html += '<span></span>';
+        }
+
+        if (rating) {
+            html += '<span class="library-overlay__score" aria-label="Your score: '
+                + rating + ' out of 10">'
+                + '<svg class="library-overlay__score-star" viewBox="0 0 24 24" aria-hidden="true">'
+                + '<path fill="currentColor" d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/>'
+                + '</svg>'
+                + rating
+                + '</span>';
+        }
+
+        overlay.innerHTML = html;
     }
 
     function renderListChecklist() {
@@ -396,10 +484,7 @@
                 watchedBtn.disabled = false;
 
                 if (data.success) {
-                    state.isWatched = !!data.is_watched;
-                    state.isWantToWatch = !!data.in_want_to_watch;
-                    updateWatchedDisplay(state.isWatched);
-                    updateWantToWatchDisplay(state.isWantToWatch);
+                    applyLibraryState(data);
                     showToast(panelToast, data.message, false);
                 } else {
                     showToast(panelToast, data.message || 'Could not update watched status.', true);
@@ -420,16 +505,34 @@
                 wantToWatchBtn.disabled = false;
 
                 if (data.success) {
-                    state.isWantToWatch = !!data.in_want_to_watch;
-                    state.isWatched = !!data.is_watched;
-                    updateWantToWatchDisplay(state.isWantToWatch);
-                    updateWatchedDisplay(state.isWatched);
+                    applyLibraryState(data);
                     showToast(panelToast, data.message, false);
                 } else {
                     showToast(panelToast, data.message || 'Could not update Want to Watch.', true);
                 }
             }).catch(function () {
                 wantToWatchBtn.disabled = false;
+                showToast(panelToast, 'Network error. Please try again.', true);
+            });
+        });
+    }
+
+    /* Currently Watching toggle (TV only) */
+    if (currentlyWatchingBtn) {
+        currentlyWatchingBtn.addEventListener('click', function () {
+            currentlyWatchingBtn.disabled = true;
+
+            apiRequest('toggle_currently_watching').then(function (data) {
+                currentlyWatchingBtn.disabled = false;
+
+                if (data.success) {
+                    applyLibraryState(data);
+                    showToast(panelToast, data.message, false);
+                } else {
+                    showToast(panelToast, data.message || 'Could not update Currently Watching.', true);
+                }
+            }).catch(function () {
+                currentlyWatchingBtn.disabled = false;
                 showToast(panelToast, 'Network error. Please try again.', true);
             });
         });

@@ -5,7 +5,7 @@ declare(strict_types=1);
 /**
  * Cinomnia User Actions API
  *
- * Authenticated JSON endpoint for custom lists, ratings, watched status, and notes.
+ * JSON endpoint for custom lists, ratings, watched status, and notes.
  * Lives at the app root so it shares the same session cookie path as other pages.
  */
 
@@ -29,17 +29,13 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     jsonResponse(['success' => false, 'message' => 'Method not allowed.'], 405);
 }
 
-if (!$auth->isLoggedIn()) {
-    jsonResponse(['success' => false, 'message' => 'Authentication required.'], 401);
-}
-
 $csrfToken = Security::getRequestCsrfToken();
 
 if (!Security::validateCsrfToken($csrfToken)) {
     jsonResponse(['success' => false, 'message' => 'Invalid security token.'], 403);
 }
 
-$userId    = (int) $auth->getUserId();
+$userId    = OWNER_USER_ID;
 $action    = postParam('action');
 $tmdbId    = (int) postParam('tmdb_id', '0');
 $mediaType = postParam('media_type', 'movie');
@@ -144,13 +140,17 @@ switch ($action) {
     case 'toggle_want_to_watch':
         jsonResponse($userMedia->toggleWantToWatch($userId, $tmdbId, $mediaType, $title, $poster));
 
+    case 'toggle_currently_watching':
+        jsonResponse($userMedia->toggleCurrentlyWatching($userId, $tmdbId, $mediaType, $title, $poster));
+
     case 'get_interaction':
         jsonResponse([
-            'success'          => true,
-            'interaction'      => $userMedia->getInteraction($userId, $tmdbId, $mediaType),
-            'list_ids'         => $customLists->getListIdsContainingItem($userId, $tmdbId, $mediaType),
-            'lists'            => $customLists->getSelectableListsForUser($userId),
-            'in_want_to_watch' => $customLists->isItemInWantToWatchList($userId, $tmdbId, $mediaType),
+            'success'                 => true,
+            'interaction'             => $userMedia->getInteraction($userId, $tmdbId, $mediaType),
+            'list_ids'                => $customLists->getListIdsContainingItem($userId, $tmdbId, $mediaType),
+            'lists'                   => $customLists->getSelectableListsForUser($userId),
+            'in_want_to_watch'        => $customLists->isItemInWantToWatchList($userId, $tmdbId, $mediaType),
+            'in_currently_watching'   => $customLists->isItemInCurrentlyWatchingList($userId, $tmdbId, $mediaType),
         ]);
 
     case 'get_history':

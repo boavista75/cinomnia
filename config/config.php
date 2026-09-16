@@ -5,10 +5,10 @@ declare(strict_types=1);
 /**
  * Cinomnia - Global Application Configuration
  *
- * Central configuration file for owner login, TMDB API settings,
- * and session security parameters. Loaded once via bootstrap.php.
+ * Central configuration file for TMDB API settings and session
+ * security parameters. Loaded once via bootstrap.php.
  *
- * Secrets (APP_PASSWORD_HASH, TMDB_API_KEY) are loaded from a .env file in the project root.
+ * Secrets (TMDB_API_KEY) are loaded from a .env file in the project root.
  * Copy .env.example to .env and fill in your values — never commit .env.
  */
 
@@ -125,18 +125,10 @@ const APP_NAME = 'Cinomnia';
 const APP_ROOT = __DIR__ . '/..';
 
 // ---------------------------------------------------------------------------
-// Single-owner login (no database, no registration)
+// Local JSON store (lists, ratings, notes)
 // ---------------------------------------------------------------------------
-define('APP_USERNAME', cinomniaEnv('APP_USERNAME'));
-define('APP_PASSWORD_HASH', cinomniaEnv('APP_PASSWORD_HASH'));
-define('APP_PASSWORD', cinomniaEnv('APP_PASSWORD'));
+const OWNER_USER_ID = 1;
 define('DATA_STORE_PATH', APP_ROOT . '/data/store.json');
-
-if (APP_USERNAME === '' || (APP_PASSWORD_HASH === '' && APP_PASSWORD === '')) {
-    throw new RuntimeException(
-        'Owner login is not set. Copy .env.example to .env and set APP_USERNAME plus APP_PASSWORD or APP_PASSWORD_HASH.'
-    );
-}
 
 /**
  * Application web root (always the project folder, not the current script subfolder).
@@ -189,8 +181,3 @@ define('APP_IS_HTTPS', cinomniaIsHttps());
 const SESSION_NAME         = 'CINOMNIA_SESSION';
 const SESSION_LIFETIME     = 3600;       // 1 hour in seconds
 const SESSION_REGEN_INTERVAL = 300;      // Regenerate session ID every 5 minutes
-
-// ---------------------------------------------------------------------------
-// Password hashing (PHP will use bcrypt by default; Argon2id if available)
-// ---------------------------------------------------------------------------
-const PASSWORD_ALGO = PASSWORD_DEFAULT;

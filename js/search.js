@@ -94,6 +94,16 @@
         if (item.rating && item.rating !== 'N/A' && item.rating !== '0.0') {
             parts.push(item.rating);
         }
+        if (item.currently_watching) {
+            parts.push('Currently Watching');
+        } else if (item.is_watched) {
+            parts.push('Watched');
+        } else if (item.want_to_watch) {
+            parts.push('Want to Watch');
+        }
+        if (item.user_rating) {
+            parts.push('You ' + item.user_rating);
+        }
         return parts.join(' · ');
     }
 

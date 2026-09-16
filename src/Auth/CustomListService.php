@@ -11,9 +11,9 @@ use Cinomnia\Storage\JsonStore;
  */
 final class CustomListService
 {
-    public const WATCHED_LIST_NAME        = 'watched';
-    public const RATED_LIST_NAME          = 'You Have Rated';
-    public const WANT_TO_WATCH_LIST_NAME  = 'Want to Watch';
+    public const WATCHED_LIST_NAME              = 'watched';
+    public const WANT_TO_WATCH_LIST_NAME        = 'Want to Watch';
+    public const CURRENTLY_WATCHING_LIST_NAME   = 'Currently Watching';
 
     /**
      * @return list<string>
@@ -22,8 +22,8 @@ final class CustomListService
     {
         return [
             self::WANT_TO_WATCH_LIST_NAME,
+            self::CURRENTLY_WATCHING_LIST_NAME,
             self::WATCHED_LIST_NAME,
-            self::RATED_LIST_NAME,
         ];
     }
 
@@ -97,12 +97,12 @@ final class CustomListService
             return ['success' => false, 'message' => 'The watched list cannot be renamed.'];
         }
 
-        if ($this->isRatedList(0, $listId)) {
-            return ['success' => false, 'message' => 'The rated list cannot be renamed.'];
-        }
-
         if ($this->isWantToWatchList(0, $listId)) {
             return ['success' => false, 'message' => 'The Want to Watch list cannot be renamed.'];
+        }
+
+        if ($this->isCurrentlyWatchingList(0, $listId)) {
+            return ['success' => false, 'message' => 'The Currently Watching list cannot be renamed.'];
         }
 
         $name = $this->normalizeListName($name);
@@ -145,12 +145,12 @@ final class CustomListService
             return ['success' => false, 'message' => 'The watched list cannot be deleted.'];
         }
 
-        if ($this->isRatedList(0, $listId)) {
-            return ['success' => false, 'message' => 'The rated list cannot be deleted.'];
-        }
-
         if ($this->isWantToWatchList(0, $listId)) {
             return ['success' => false, 'message' => 'The Want to Watch list cannot be deleted.'];
+        }
+
+        if ($this->isCurrentlyWatchingList(0, $listId)) {
+            return ['success' => false, 'message' => 'The Currently Watching list cannot be deleted.'];
         }
 
         return $this->store->mutate(function (array &$data) use ($listId): array {
@@ -212,52 +212,6 @@ final class CustomListService
     ): void {
         $listId = $this->getOrCreateWatchedList($userId);
         $this->addItem($userId, $listId, $tmdbId, $mediaType, $title, $posterPath);
-    }
-
-    public function getOrCreateRatedList(int $userId): int
-    {
-        $existingId = $this->findListIdByName($userId, self::RATED_LIST_NAME);
-
-        if ($existingId !== null) {
-            return $existingId;
-        }
-
-        $result = $this->createList($userId, self::RATED_LIST_NAME);
-
-        if (!$result['success'] || !isset($result['list_id'])) {
-            $existingId = $this->findListIdByName($userId, self::RATED_LIST_NAME);
-
-            if ($existingId !== null) {
-                return $existingId;
-            }
-
-            throw new \RuntimeException($result['message'] ?? 'Could not create rated list.');
-        }
-
-        return (int) $result['list_id'];
-    }
-
-    /**
-     * @param 'movie'|'tv' $mediaType
-     */
-    public function syncRatedListAdd(
-        int $userId,
-        int $tmdbId,
-        string $mediaType,
-        ?string $title = null,
-        ?string $posterPath = null
-    ): void {
-        $listId = $this->getOrCreateRatedList($userId);
-        $this->addItem($userId, $listId, $tmdbId, $mediaType, $title, $posterPath);
-    }
-
-    /**
-     * @param 'movie'|'tv' $mediaType
-     */
-    public function syncRatedListRemove(int $userId, int $tmdbId, string $mediaType): void
-    {
-        unset($userId);
-        $this->removeItemByName(self::RATED_LIST_NAME, $tmdbId, $mediaType);
     }
 
     /**
@@ -327,6 +281,121 @@ final class CustomListService
         }
 
         return $this->isItemInList($listId, $tmdbId, $mediaType);
+    }
+
+    /**
+     * @return array<string, true> keyed by JsonStore::mediaKey()
+     */
+    public function getWantToWatchKeys(int $userId): array
+    {
+        unset($userId);
+
+        return $this->getListItemKeysByName(self::WANT_TO_WATCH_LIST_NAME);
+    }
+
+    public function getOrCreateCurrentlyWatchingList(int $userId): int
+    {
+        $existingId = $this->findListIdByName($userId, self::CURRENTLY_WATCHING_LIST_NAME);
+
+        if ($existingId !== null) {
+            return $existingId;
+        }
+
+        $result = $this->createList($userId, self::CURRENTLY_WATCHING_LIST_NAME);
+
+        if (!$result['success'] || !isset($result['list_id'])) {
+            $existingId = $this->findListIdByName($userId, self::CURRENTLY_WATCHING_LIST_NAME);
+
+            if ($existingId !== null) {
+                return $existingId;
+            }
+
+            throw new \RuntimeException($result['message'] ?? 'Could not create Currently Watching list.');
+        }
+
+        return (int) $result['list_id'];
+    }
+
+    /**
+     * @param 'movie'|'tv' $mediaType
+     */
+    public function syncCurrentlyWatchingListAdd(
+        int $userId,
+        int $tmdbId,
+        string $mediaType,
+        ?string $title = null,
+        ?string $posterPath = null
+    ): void {
+        if ($mediaType !== 'tv') {
+            return;
+        }
+
+        $listId = $this->getOrCreateCurrentlyWatchingList($userId);
+        $this->addItem($userId, $listId, $tmdbId, $mediaType, $title, $posterPath);
+    }
+
+    /**
+     * @param 'movie'|'tv' $mediaType
+     */
+    public function syncCurrentlyWatchingListRemove(int $userId, int $tmdbId, string $mediaType): void
+    {
+        unset($userId);
+        $this->removeItemByName(self::CURRENTLY_WATCHING_LIST_NAME, $tmdbId, $mediaType);
+    }
+
+    /**
+     * @param 'movie'|'tv' $mediaType
+     */
+    public function isItemInCurrentlyWatchingList(int $userId, int $tmdbId, string $mediaType): bool
+    {
+        if ($mediaType !== 'tv') {
+            return false;
+        }
+
+        $listId = $this->findListIdByName($userId, self::CURRENTLY_WATCHING_LIST_NAME);
+
+        if ($listId === null) {
+            return false;
+        }
+
+        return $this->isItemInList($listId, $tmdbId, $mediaType);
+    }
+
+    /**
+     * @return array<string, true> keyed by JsonStore::mediaKey()
+     */
+    public function getCurrentlyWatchingKeys(int $userId): array
+    {
+        unset($userId);
+
+        return $this->getListItemKeysByName(self::CURRENTLY_WATCHING_LIST_NAME);
+    }
+
+    /**
+     * @return array<string, true> keyed by JsonStore::mediaKey()
+     */
+    private function getListItemKeysByName(string $listName): array
+    {
+        $keys = [];
+
+        foreach ($this->store->read()['lists'] as $list) {
+            if (($list['name'] ?? '') !== $listName) {
+                continue;
+            }
+
+            foreach ($list['items'] ?? [] as $item) {
+                $tmdbId    = (int) ($item['tmdb_id'] ?? 0);
+                $mediaType = (string) ($item['media_type'] ?? '');
+
+                if ($tmdbId > 0 && in_array($mediaType, ['movie', 'tv'], true)) {
+                    $keys[JsonStore::mediaKey($tmdbId, $mediaType)] = true;
+                }
+            }
+
+            break;
+        }
+
+        return $keys;
     }
 
     /**
@@ -561,9 +630,8 @@ final class CustomListService
         }
 
         $removedFromWatched = false;
-        $removedFromRated   = false;
 
-        $result = $this->store->mutate(function (array &$data) use ($listId, $tmdbId, $mediaType, &$removedFromWatched, &$removedFromRated): array {
+        $result = $this->store->mutate(function (array &$data) use ($listId, $tmdbId, $mediaType, &$removedFromWatched): array {
             $index = $this->findListIndex($data, $listId);
 
             if ($index === null) {
@@ -584,7 +652,6 @@ final class CustomListService
             $data['lists'][$index]['updated_at'] = JsonStore::now();
             $listName = (string) $data['lists'][$index]['name'];
             $removedFromWatched = $listName === self::WATCHED_LIST_NAME;
-            $removedFromRated   = $listName === self::RATED_LIST_NAME;
 
             return ['success' => true, 'message' => 'Removed from your list.'];
         });
@@ -592,9 +659,6 @@ final class CustomListService
         if ($result['success'] && $this->ratingsHistory !== null) {
             if ($removedFromWatched) {
                 $this->ratingsHistory->clearWatchedStatus($userId, $tmdbId, $mediaType);
-            }
-            if ($removedFromRated) {
-                $this->ratingsHistory->clearRatingStatus($userId, $tmdbId, $mediaType);
             }
         }
 
@@ -614,19 +678,6 @@ final class CustomListService
         return false;
     }
 
-    public function isRatedList(int $userId, int $listId): bool
-    {
-        unset($userId);
-
-        foreach ($this->store->read()['lists'] as $list) {
-            if ((int) $list['id'] === $listId) {
-                return ($list['name'] ?? '') === self::RATED_LIST_NAME;
-            }
-        }
-
-        return false;
-    }
-
     public function isWantToWatchList(int $userId, int $listId): bool
     {
         unset($userId);
@@ -640,11 +691,24 @@ final class CustomListService
         return false;
     }
 
+    public function isCurrentlyWatchingList(int $userId, int $listId): bool
+    {
+        unset($userId);
+
+        foreach ($this->store->read()['lists'] as $list) {
+            if ((int) $list['id'] === $listId) {
+                return ($list['name'] ?? '') === self::CURRENTLY_WATCHING_LIST_NAME;
+            }
+        }
+
+        return false;
+    }
+
     public function isSystemList(int $userId, int $listId): bool
     {
         return $this->isWatchedList($userId, $listId)
-            || $this->isRatedList($userId, $listId)
-            || $this->isWantToWatchList($userId, $listId);
+            || $this->isWantToWatchList($userId, $listId)
+            || $this->isCurrentlyWatchingList($userId, $listId);
     }
 
     /**

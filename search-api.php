@@ -27,16 +27,14 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     searchJson(['success' => false, 'message' => 'Method not allowed.', 'results' => []], 405);
 }
 
-if (!$auth->isLoggedIn()) {
-    searchJson(['success' => false, 'message' => 'Authentication required.', 'results' => []], 401);
-}
-
 $query = trim(preg_replace('/\s+/', ' ', getParam('q')) ?? '');
 $query = mb_substr($query, 0, 80);
 
 if (mb_strlen($query) < 2) {
     searchJson(['success' => true, 'query' => $query, 'results' => []]);
 }
+
+$libraryIndex = $userMedia->getLibraryIndex(OWNER_USER_ID);
 
 try {
     $items = $tmdb->search($query, 1);
@@ -63,16 +61,21 @@ foreach ($items as $item) {
     $type  = $tmdb->getMediaType($item, 'movie');
     $year  = $tmdb->getYear($item);
     $title = $tmdb->getTitle($item);
+    $flags = libraryFlags($libraryIndex, $id, $type);
 
     $results[] = [
-        'id'     => $id,
-        'type'   => $type,
-        'label'  => $tmdb->getMediaTypeLabel($item, $type),
-        'title'  => $title,
-        'year'   => $year,
-        'rating' => $tmdb->formatRating($item['vote_average'] ?? null),
-        'poster' => $tmdb->posterUrl($item['poster_path'] ?? null, 'w92'),
-        'url'    => BASE_URL . '/details.php?type=' . rawurlencode($type) . '&id=' . $id,
+        'id'            => $id,
+        'type'          => $type,
+        'label'         => $tmdb->getMediaTypeLabel($item, $type),
+        'title'         => $title,
+        'year'          => $year,
+        'rating'        => $tmdb->formatRating($item['vote_average'] ?? null),
+        'user_rating'          => $flags['rating'],
+        'is_watched'           => $flags['is_watched'],
+        'want_to_watch'        => $flags['want_to_watch'] && !$flags['is_watched'] && !$flags['currently_watching'],
+        'currently_watching'   => $flags['currently_watching'] && !$flags['is_watched'],
+        'poster'        => $tmdb->posterUrl($item['poster_path'] ?? null, 'w92'),
+        'url'           => BASE_URL . '/details.php?type=' . rawurlencode($type) . '&id=' . $id,
     ];
 }
 

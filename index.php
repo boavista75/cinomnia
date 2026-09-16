@@ -5,8 +5,8 @@ declare(strict_types=1);
 /**
  * Cinomnia Home Page
  *
- * Displays a responsive grid of movies/TV shows fetched from TMDB.
- * Sidebar filters: search, media type, sort, release year, rating, genres.
+ * Centered discovery stage (title + search + media switch) above a docking
+ * filter rail and a card grid of movies/TV shows fetched from TMDB.
  */
 
 require_once __DIR__ . '/includes/bootstrap.php';
@@ -45,6 +45,7 @@ $baseQuery = [
 $errorMessage = null;
 $results      = [];
 $genres       = [];
+$libraryIndex = $userMedia->getLibraryIndex(OWNER_USER_ID);
 
 // Human-readable labels for the results heading
 $sortLabels = [
@@ -99,33 +100,41 @@ try {
         . ' [' . $e->getMessage() . ']';
     $genres = [];
 }
+
+$activeGenreName = '';
+if ($genreId > 0) {
+    $activeGenreName = array_values(array_filter($genres, fn ($g) => (int) $g['id'] === $genreId))[0]['name'] ?? 'Genre';
+}
 ?>
 
 <main class="browse">
-    <section class="browse__hero">
-        <p class="browse__eyebrow">Private cinema</p>
-        <div class="content__header">
-            <h1 class="content__title">
+    <!-- The whole browsing experience lives inside one GET form: the centered
+         stage, the docking filter rail and the results it produces. -->
+    <form class="finder" method="GET" action="<?= Security::escape(BASE_URL) ?>/index.php" aria-label="Filters">
+
+        <section class="stage">
+            <p class="browse__eyebrow">Private cinema</p>
+
+            <h1 class="content__title stage__title">
                 <?php if ($search !== ''): ?>
                     Results for “<?= Security::escape($search) ?>”
                 <?php else: ?>
                     <?= Security::escape($sortLabels[$sort] ?? 'Trending') ?>
                     <?= Security::escape($mediaType === 'tv' ? 'TV Shows' : 'Movies') ?>
-                    <?php if ($genreId > 0): ?>
-                        — <?= Security::escape(
-                            array_values(array_filter($genres, fn($g) => (int) $g['id'] === $genreId))[0]['name'] ?? 'Genre'
-                        ) ?>
+                    <?php if ($activeGenreName !== ''): ?>
+                        — <?= Security::escape($activeGenreName) ?>
                     <?php endif; ?>
                 <?php endif; ?>
             </h1>
-            <span class="content__count"><?= count($results) ?> titles</span>
-        </div>
-    </section>
 
-    <form class="filters" method="GET" action="<?= Security::escape(BASE_URL) ?>/index.php" aria-label="Filters">
-        <div class="filters__primary">
-            <div class="filters__search" data-search-url="<?= Security::escape(BASE_URL) ?>/search-api.php">
+            <p class="content__count stage__count"><?= count($results) ?> titles</p>
+
+            <div class="filters__search stage__search" data-search-url="<?= Security::escape(BASE_URL) ?>/search-api.php">
                 <label class="visually-hidden" for="q">Search</label>
+                <svg class="stage__search-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="11" cy="11" r="6.4" fill="none" stroke="currentColor" stroke-width="1.9"/>
+                    <path d="M16 16l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+                </svg>
                 <input
                     type="search"
                     id="q"
@@ -162,176 +171,193 @@ try {
                     <span class="segmented__pill">TV Shows</span>
                 </label>
             </div>
+        </section>
 
-            <button type="submit" class="btn btn--primary filters__apply">Apply</button>
+        <!-- Docking control rail: every refinement as a capsule field -->
+        <div class="rail">
+            <div class="rail__scroller">
+                <div class="field field--chips">
+                    <span class="field__label filters__label">Sort</span>
+                    <div class="chip-group" role="radiogroup" aria-label="Sort by">
+                        <?php foreach ($sortLabels as $sortKey => $sortLabel): ?>
+                            <label class="chip">
+                                <input type="radio" name="sort" value="<?= Security::escape($sortKey) ?>"<?= $sort === $sortKey ? ' checked' : '' ?>>
+                                <span class="chip__label"><?= Security::escape($sortLabel) ?></span>
+                            </label>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label class="field__label filters__label" for="genre">Genre</label>
+                    <div class="select-wrap">
+                        <select id="genre" name="genre" class="select">
+                            <option value="0">All Genres</option>
+                            <?php foreach ($genres as $genre): ?>
+                                <option value="<?= (int) $genre['id'] ?>"<?= $genreId === (int) $genre['id'] ? ' selected' : '' ?>>
+                                    <?= Security::escape($genre['name']) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <span class="field__label filters__label">Year</span>
+                    <div class="filters__range">
+                        <div class="select-wrap">
+                            <select name="year_from" class="select" aria-label="Year from">
+                                <option value="">From</option>
+                                <?php foreach ($yearOptions as $year): ?>
+                                    <option value="<?= $year ?>"<?= $yearFrom === $year ? ' selected' : '' ?>><?= $year ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <span class="filters__range-sep" aria-hidden="true">–</span>
+                        <div class="select-wrap">
+                            <select name="year_to" class="select" aria-label="Year to">
+                                <option value="">To</option>
+                                <?php foreach ($yearOptions as $year): ?>
+                                    <option value="<?= $year ?>"<?= $yearTo === $year ? ' selected' : '' ?>><?= $year ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label class="field__label filters__label" for="rating">Rating</label>
+                    <div class="select-wrap">
+                        <select id="rating" name="rating" class="select">
+                            <option value="">Any rating</option>
+                            <?php foreach ($ratingLabels as $ratingKey => $ratingLabel): ?>
+                                <option value="<?= Security::escape($ratingKey) ?>"<?= $rating === $ratingKey ? ' selected' : '' ?>>
+                                    <?= Security::escape($ratingLabel) ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div class="rail__actions">
+                <a href="<?= Security::escape(BASE_URL) ?>/index.php" class="filters__reset-link">Reset</a>
+                <button type="submit" class="btn btn--primary filters__apply">Apply</button>
+            </div>
         </div>
 
-        <div class="filters__secondary">
-            <div class="filters__group">
-                <span class="filters__label">Sort</span>
-                <div class="chip-group" role="radiogroup" aria-label="Sort by">
-                    <?php foreach ($sortLabels as $sortKey => $sortLabel): ?>
-                        <label class="chip">
-                            <input type="radio" name="sort" value="<?= Security::escape($sortKey) ?>"<?= $sort === $sortKey ? ' checked' : '' ?>>
-                            <span class="chip__label"><?= Security::escape($sortLabel) ?></span>
-                        </label>
+        <section class="content" aria-label="Results">
+
+            <?php if ($search === '' && ($yearFrom > 0 || $yearTo > 0 || $rating !== '')): ?>
+                <div class="active-filters" aria-label="Active filters">
+                    <?php if ($yearFrom > 0 || $yearTo > 0): ?>
+                        <span class="active-filters__tag">
+                            Year:
+                            <?= $yearFrom > 0 ? Security::escape((string) $yearFrom) : 'Any' ?>
+                            –
+                            <?= $yearTo > 0 ? Security::escape((string) $yearTo) : 'Any' ?>
+                        </span>
+                    <?php endif; ?>
+                    <?php if ($rating !== ''): ?>
+                        <span class="active-filters__tag">
+                            Rating: <?= Security::escape($ratingLabels[$rating] ?? $rating) ?>
+                        </span>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
+
+            <?php if ($errorMessage !== null): ?>
+                <div class="alert alert--error" role="alert">
+                    <?= Security::escape($errorMessage) ?>
+                </div>
+            <?php elseif (empty($results)): ?>
+                <div class="empty-state">
+                    <div class="empty-state__glyph" aria-hidden="true">
+                        <svg viewBox="0 0 24 24">
+                            <circle cx="11" cy="11" r="6.4" fill="none" stroke="currentColor" stroke-width="1.6"/>
+                            <path d="M16 16l4.2 4.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                        </svg>
+                    </div>
+                    <p>No results found. Try a different search or filter.</p>
+                </div>
+            <?php else: ?>
+                <div class="grid">
+                    <?php foreach ($results as $item): ?>
+                        <?php
+                        $itemType    = $tmdb->getMediaType($item, $mediaType);
+                        $typeLabel   = $tmdb->getMediaTypeLabel($item, $mediaType);
+                        $itemId      = (int) ($item['id'] ?? 0);
+                        $title       = $tmdb->getTitle($item);
+                        $itemRating  = $tmdb->formatRating($item['vote_average'] ?? null);
+                        $poster      = $tmdb->posterUrl($item['poster_path'] ?? null);
+
+                        // Metadata enriched via parallel TMDB detail requests
+                        $releaseDate = $tmdb->formatDate($item);
+                        $runtime     = $tmdb->formatRuntime($item['runtime'] ?? null);
+                        $seasons     = $tmdb->formatSeasonCount(
+                            isset($item['number_of_seasons']) ? (int) $item['number_of_seasons'] : null
+                        );
+                        $episodes    = $tmdb->formatEpisodeCount(
+                            isset($item['number_of_episodes']) ? (int) $item['number_of_episodes'] : null
+                        );
+                        $overview    = $tmdb->truncateOverview($item['overview'] ?? null);
+                        $itemFlags   = libraryFlags($libraryIndex, $itemId, $itemType);
+                        ?>
+                        <article class="card">
+                            <a href="<?= Security::escape(BASE_URL) ?>/details.php?type=<?= Security::escape($itemType) ?>&amp;id=<?= $itemId ?>"
+                               class="card__link">
+                                <div class="card__media">
+                                    <img
+                                        src="<?= Security::escape($poster) ?>"
+                                        alt=""
+                                        class="card__poster"
+                                        loading="lazy"
+                                        width="342"
+                                        height="513"
+                                    >
+                                    <span class="card__badge card__badge--<?= Security::escape($itemType) ?>">
+                                        <?= Security::escape($typeLabel) ?>
+                                    </span>
+                                    <div class="card__rating" aria-label="Rating: <?= Security::escape($itemRating) ?> out of 10">
+                                        <span class="card__rating-value"><?= Security::escape($itemRating) ?></span>
+                                    </div>
+                                    <?php renderLibraryOverlay($itemFlags); ?>
+                                    <?php if (!empty($item['on_apple_tv'])): ?>
+                                        <?php renderAppleTvBadge(); ?>
+                                    <?php endif; ?>
+                                    <div class="card__reveal">
+                                        <p class="card__overview"><?= Security::escape($overview) ?></p>
+                                    </div>
+                                </div>
+
+                                <div class="card__body">
+                                    <h2 class="card__title"><?= Security::escape($title) ?></h2>
+                                    <p class="card__date"><?= Security::escape($releaseDate) ?></p>
+                                    <?php if ($itemType === 'tv'): ?>
+                                        <p class="card__meta"><?= Security::escape($seasons) ?> · <?= Security::escape($episodes) ?></p>
+                                    <?php else: ?>
+                                        <p class="card__meta"><?= Security::escape($runtime) ?></p>
+                                    <?php endif; ?>
+                                </div>
+                            </a>
+                        </article>
                     <?php endforeach; ?>
                 </div>
-            </div>
 
-            <div class="filters__group filters__group--select">
-                <label class="filters__label" for="genre">Genre</label>
-                <div class="select-wrap">
-                    <select id="genre" name="genre" class="select">
-                        <option value="0">All Genres</option>
-                        <?php foreach ($genres as $genre): ?>
-                            <option value="<?= (int) $genre['id'] ?>"<?= $genreId === (int) $genre['id'] ? ' selected' : '' ?>>
-                                <?= Security::escape($genre['name']) ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-            </div>
-
-            <div class="filters__group filters__group--select">
-                <span class="filters__label">Year</span>
-                <div class="filters__range">
-                    <div class="select-wrap">
-                        <select name="year_from" class="select" aria-label="Year from">
-                            <option value="">From</option>
-                            <?php foreach ($yearOptions as $year): ?>
-                                <option value="<?= $year ?>"<?= $yearFrom === $year ? ' selected' : '' ?>><?= $year ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <span class="filters__range-sep" aria-hidden="true">–</span>
-                    <div class="select-wrap">
-                        <select name="year_to" class="select" aria-label="Year to">
-                            <option value="">To</option>
-                            <?php foreach ($yearOptions as $year): ?>
-                                <option value="<?= $year ?>"<?= $yearTo === $year ? ' selected' : '' ?>><?= $year ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                </div>
-            </div>
-
-            <div class="filters__group filters__group--select">
-                <label class="filters__label" for="rating">Rating</label>
-                <div class="select-wrap">
-                    <select id="rating" name="rating" class="select">
-                        <option value="">Any rating</option>
-                        <?php foreach ($ratingLabels as $ratingKey => $ratingLabel): ?>
-                            <option value="<?= Security::escape($ratingKey) ?>"<?= $rating === $ratingKey ? ' selected' : '' ?>>
-                                <?= Security::escape($ratingLabel) ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-            </div>
-
-            <a href="<?= Security::escape(BASE_URL) ?>/index.php" class="filters__reset-link">Reset</a>
-        </div>
+                <nav class="pagination" aria-label="Pagination">
+                    <?php if ($page > 1): ?>
+                        <a href="?<?= buildFilterQuery(array_merge($baseQuery, ['page' => $page - 1])) ?>"
+                           class="btn btn--secondary">&larr; Previous</a>
+                    <?php endif; ?>
+                    <span class="pagination__current">Page <?= $page ?></span>
+                    <?php if (count($results) >= TMDB_Service::BROWSE_PAGE_SIZE): ?>
+                        <a href="?<?= buildFilterQuery(array_merge($baseQuery, ['page' => $page + 1])) ?>"
+                           class="btn btn--secondary">Next &rarr;</a>
+                    <?php endif; ?>
+                </nav>
+            <?php endif; ?>
+        </section>
     </form>
-
-    <section class="content" aria-label="Results">
-
-        <?php if ($search === '' && ($yearFrom > 0 || $yearTo > 0 || $rating !== '')): ?>
-            <div class="active-filters" aria-label="Active filters">
-                <?php if ($yearFrom > 0 || $yearTo > 0): ?>
-                    <span class="active-filters__tag">
-                        Year:
-                        <?= $yearFrom > 0 ? Security::escape((string) $yearFrom) : 'Any' ?>
-                        –
-                        <?= $yearTo > 0 ? Security::escape((string) $yearTo) : 'Any' ?>
-                    </span>
-                <?php endif; ?>
-                <?php if ($rating !== ''): ?>
-                    <span class="active-filters__tag">
-                        Rating: <?= Security::escape($ratingLabels[$rating] ?? $rating) ?>
-                    </span>
-                <?php endif; ?>
-            </div>
-        <?php endif; ?>
-
-        <?php if ($errorMessage !== null): ?>
-            <div class="alert alert--error" role="alert">
-                <?= Security::escape($errorMessage) ?>
-            </div>
-        <?php elseif (empty($results)): ?>
-            <div class="empty-state">
-                <p>No results found. Try a different search or filter.</p>
-            </div>
-        <?php else: ?>
-            <div class="grid">
-                <?php foreach ($results as $item): ?>
-                    <?php
-                    $itemType    = $tmdb->getMediaType($item, $mediaType);
-                    $typeLabel   = $tmdb->getMediaTypeLabel($item, $mediaType);
-                    $itemId      = (int) ($item['id'] ?? 0);
-                    $title       = $tmdb->getTitle($item);
-                    $itemRating  = $tmdb->formatRating($item['vote_average'] ?? null);
-                    $poster      = $tmdb->posterUrl($item['poster_path'] ?? null);
-
-                    // Metadata enriched via parallel TMDB detail requests
-                    $releaseDate = $tmdb->formatDate($item);
-                    $runtime     = $tmdb->formatRuntime($item['runtime'] ?? null);
-                    $seasons     = $tmdb->formatSeasonCount(
-                        isset($item['number_of_seasons']) ? (int) $item['number_of_seasons'] : null
-                    );
-                    $episodes    = $tmdb->formatEpisodeCount(
-                        isset($item['number_of_episodes']) ? (int) $item['number_of_episodes'] : null
-                    );
-                    $overview    = $tmdb->truncateOverview($item['overview'] ?? null);
-                    ?>
-                    <article class="card">
-                        <a href="<?= Security::escape(BASE_URL) ?>/details.php?type=<?= Security::escape($itemType) ?>&amp;id=<?= $itemId ?>"
-                           class="card__link">
-                            <div class="card__media">
-                                <img
-                                    src="<?= Security::escape($poster) ?>"
-                                    alt=""
-                                    class="card__poster"
-                                    loading="lazy"
-                                    width="342"
-                                    height="513"
-                                >
-                                <span class="card__badge card__badge--<?= Security::escape($itemType) ?>">
-                                    <?= Security::escape($typeLabel) ?>
-                                </span>
-                                <div class="card__rating" aria-label="Rating: <?= Security::escape($itemRating) ?> out of 10">
-                                    <span class="card__rating-value"><?= Security::escape($itemRating) ?></span>
-                                </div>
-                            </div>
-
-                            <div class="card__body">
-                                <h2 class="card__title"><?= Security::escape($title) ?></h2>
-                                <p class="card__date"><?= Security::escape($releaseDate) ?></p>
-                                <p class="card__overview"><?= Security::escape($overview) ?></p>
-                                <?php if ($itemType === 'tv'): ?>
-                                    <p class="card__meta"><?= Security::escape($seasons) ?> · <?= Security::escape($episodes) ?></p>
-                                <?php else: ?>
-                                    <p class="card__meta"><?= Security::escape($runtime) ?></p>
-                                <?php endif; ?>
-                            </div>
-                        </a>
-                    </article>
-                <?php endforeach; ?>
-            </div>
-
-            <nav class="pagination" aria-label="Pagination">
-                <?php if ($page > 1): ?>
-                    <a href="?<?= buildFilterQuery(array_merge($baseQuery, ['page' => $page - 1])) ?>"
-                       class="btn btn--secondary">&larr; Previous</a>
-                <?php endif; ?>
-                <span class="pagination__current">Page <?= $page ?></span>
-                <?php if (count($results) >= TMDB_Service::BROWSE_PAGE_SIZE): ?>
-                    <a href="?<?= buildFilterQuery(array_merge($baseQuery, ['page' => $page + 1])) ?>"
-                       class="btn btn--secondary">Next &rarr;</a>
-                <?php endif; ?>
-            </nav>
-        <?php endif; ?>
-    </section>
 </main>
 
 <?php require __DIR__ . '/includes/footer.php'; ?>
